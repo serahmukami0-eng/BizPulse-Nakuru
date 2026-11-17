@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Project X</string>
+    <string name="brand_subtitle">Nakuru SME Command Center</string>
+    <string name="currency_kes">KES</string>
+    <string name="sign_in_google">Sign in with Google</string>
+    <string name="continue_google">Continue with Google</string>
+    <string name="demo_data_badge">DEMO DATA — SAMPLE ONLY</string>
+</resources>

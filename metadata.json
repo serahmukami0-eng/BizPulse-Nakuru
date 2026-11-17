@@ -1,0 +1,6 @@
+{
+  "name": "Project X",
+  "description": "Standalone research-aligned SME digital management application for enterprises in Nakuru Town, Kenya, covering Digital Marketing, Digital Payment Systems, Computerized Record Keeping, Online Communication, SME Performance Analytics, Reports, and Gemini AI Intelligence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

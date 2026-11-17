@@ -1,0 +1,519 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default deny all unmatched paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HARDENED PRIMITIVES ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isOptionalIsoDate(data, key) {
+      return !(key in data) || (data[key] is string && data[key].size() <= 20);
+    }
+
+    function isOptionalString(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptionalNonNegNumber(data, key) {
+      return !(key in data) || ((data[key] is int || data[key] is float) && data[key] >= 0 && data[key] <= 100000000);
+    }
+
+    function isOptionalNonNegInt(data, key) {
+      return !(key in data) || (data[key] is int && data[key] >= 0 && data[key] <= 1000000);
+    }
+
+    // --- ENTITY VALIDATION BLUEPRINTS ---
+    function isValidBusinessProfile(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 80 &&
+             data.businessName is string && data.businessName.size() >= 1 && data.businessName.size() <= 100 &&
+             data.businessType is string && data.businessType.size() >= 1 && data.businessType.size() <= 50 &&
+             data.locationNakuru is string && data.locationNakuru.size() >= 1 && data.locationNakuru.size() <= 80 &&
+             isOptionalString(data, 'businessSize', 50) &&
+             isOptionalString(data, 'phone', 25) &&
+             data.currency is string && data.currency == 'KES' &&
+             data.demoModeEnabled is bool;
+    }
+
+    function isValidBusinessTransaction(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             data.type in ['SALE', 'EXPENSE', 'OTHER'] &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 100 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 50 &&
+             (data.amountKes is int || data.amountKes is float) &&
+             data.amountKes > 0 && data.amountKes <= 100000000 &&
+             data.paymentMethod in ['M-PESA', 'BANK', 'CARD', 'OTHER_DIGITAL', 'CASH'] &&
+             isOptionalString(data, 'transactionRef', 80) &&
+             (!('paymentStatus' in data) || data.paymentStatus in ['COMPLETED', 'PENDING', 'FAILED', 'CANCELLED']) &&
+             isOptionalIsoDate(data, 'transactionDate') &&
+             isOptionalString(data, 'notes', 300) &&
+             isOptionalString(data, 'customerId', 128) &&
+             isOptionalString(data, 'customerName', 100) &&
+             isOptionalString(data, 'inventoryItemId', 128) &&
+             isOptionalString(data, 'inventoryItemName', 100) &&
+             isOptionalNonNegInt(data, 'quantitySold') &&
+             isOptionalNonNegNumber(data, 'unitPriceKes') &&
+             isOptionalNonNegNumber(data, 'discountKes') &&
+             isOptionalNonNegNumber(data, 'costOfGoodsSoldKes') &&
+             isOptionalString(data, 'receiptNumber', 50);
+    }
+
+    function isValidInventoryItem(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             isOptionalString(data, 'sku', 40) &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 50 &&
+             data.quantity is int && data.quantity >= 0 && data.quantity <= 1000000 &&
+             data.reorderLevel is int && data.reorderLevel >= 0 && data.reorderLevel <= 1000000 &&
+             (data.unitPriceKes is int || data.unitPriceKes is float) &&
+             data.unitPriceKes >= 0 && data.unitPriceKes <= 100000000 &&
+             isOptionalNonNegNumber(data, 'unitCostKes') &&
+             isOptionalString(data, 'supplierId', 128) &&
+             isOptionalString(data, 'supplierName', 100);
+    }
+
+    function isValidCustomerRecord(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             isOptionalString(data, 'phone', 30) &&
+             isOptionalString(data, 'email', 120) &&
+             isOptionalString(data, 'location', 80) &&
+             isOptionalString(data, 'notes', 300) &&
+             (data.totalSpentKes is int || data.totalSpentKes is float) &&
+             data.totalSpentKes >= 0 && data.totalSpentKes <= 100000000 &&
+             data.purchaseCount is int && data.purchaseCount >= 0 && data.purchaseCount <= 1000000 &&
+             isOptionalIsoDate(data, 'lastPurchaseDate') &&
+             isOptionalIsoDate(data, 'createdDate');
+    }
+
+    function isValidSupplierRecord(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             isOptionalString(data, 'contactPerson', 100) &&
+             isOptionalString(data, 'phone', 30) &&
+             isOptionalString(data, 'email', 120) &&
+             isOptionalString(data, 'location', 80) &&
+             isOptionalString(data, 'suppliedProductsSummary', 250) &&
+             isOptionalString(data, 'notes', 300);
+    }
+
+    function isValidPurchaseOrderRecord(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             isOptionalString(data, 'supplierId', 128) &&
+             isOptionalString(data, 'supplierName', 100) &&
+             isOptionalString(data, 'inventoryItemId', 128) &&
+             data.itemName is string && data.itemName.size() >= 1 && data.itemName.size() <= 100 &&
+             data.quantity is int && data.quantity > 0 && data.quantity <= 1000000 &&
+             (data.unitCostKes is int || data.unitCostKes is float) &&
+             data.unitCostKes >= 0 && data.unitCostKes <= 100000000 &&
+             (data.totalCostKes is int || data.totalCostKes is float) &&
+             data.totalCostKes >= 0 && data.totalCostKes <= 100000000 &&
+             data.paymentMethod in ['M-PESA', 'BANK', 'CARD', 'OTHER_DIGITAL', 'CASH'] &&
+             data.paymentStatus in ['PAID', 'PENDING', 'PARTIAL'] &&
+             isOptionalIsoDate(data, 'purchaseDate') &&
+             isOptionalString(data, 'notes', 300);
+    }
+
+    function isValidStockMovementRecord(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             data.inventoryItemId is string && data.inventoryItemId.size() >= 1 && data.inventoryItemId.size() <= 128 &&
+             data.itemName is string && data.itemName.size() >= 1 && data.itemName.size() <= 100 &&
+             data.movementType in ['SALE_DEDUCTION', 'PURCHASE_RESTOCK', 'MANUAL_ADJUSTMENT', 'SALE_REVERSAL'] &&
+             data.quantityDelta is int && data.quantityDelta >= -1000000 && data.quantityDelta <= 1000000 &&
+             data.balanceAfter is int && data.balanceAfter >= 0 && data.balanceAfter <= 1000000 &&
+             isOptionalString(data, 'referenceId', 128) &&
+             isOptionalNonNegNumber(data, 'unitCostKes') &&
+             isOptionalNonNegNumber(data, 'totalCostKes') &&
+             isOptionalString(data, 'supplierId', 128) &&
+             isOptionalString(data, 'supplierName', 100) &&
+             isOptionalIsoDate(data, 'movementDate') &&
+             isOptionalString(data, 'notes', 300);
+    }
+
+    function isValidDigitalMarketingCampaign(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 100 &&
+             data.channel in ['FACEBOOK', 'INSTAGRAM', 'WHATSAPP_STATUS', 'TIKTOK', 'GOOGLE_MAPS', 'SMS'] &&
+             isOptionalIsoDate(data, 'campaignDate') &&
+             (data.spendKes is int || data.spendKes is float) &&
+             data.spendKes >= 0 && data.spendKes <= 100000000 &&
+             data.reachCount is int && data.reachCount >= 0 && data.reachCount <= 100000000 &&
+             data.engagementCount is int && data.engagementCount >= 0 && data.engagementCount <= 100000000 &&
+             data.inquiriesGenerated is int && data.inquiriesGenerated >= 0 && data.inquiriesGenerated <= 10000000 &&
+             data.status in ['ACTIVE', 'PAUSED', 'COMPLETED'] &&
+             isOptionalString(data, 'notes', 300);
+    }
+
+    function isValidOnlineCommunicationLog(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+             data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 100 &&
+             data.channel in ['WHATSAPP', 'FACEBOOK_DM', 'INSTAGRAM_DM', 'EMAIL', 'SMS', 'WEB_CHAT', 'OTHER'] &&
+             (!('category' in data) || data.category in ['INQUIRY', 'COMPLAINT', 'ORDER_UPDATE', 'FEEDBACK']) &&
+             data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 120 &&
+             isOptionalIsoDate(data, 'receivedDate') &&
+             isOptionalIsoDate(data, 'responseDate') &&
+             data.status in ['PENDING', 'RESPONDED', 'CONVERTED'] &&
+             data.responseMinutes is int && data.responseMinutes >= 0 && data.responseMinutes <= 1000000 &&
+             isOptionalString(data, 'notes', 300);
+    }
+
+    // --- COLLECTION RULES ---
+
+    // 1. User-owned SME Business Profile
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'ownerName', 'businessName', 'businessType',
+                         'locationNakuru', 'currency', 'demoModeEnabled',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'ownerName', 'businessName', 'businessType',
+                         'locationNakuru', 'businessSize', 'phone', 'currency',
+                         'demoModeEnabled', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidBusinessProfile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidBusinessProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().currency == existing().currency &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'ownerName', 'businessName', 'businessType',
+                         'locationNakuru', 'businessSize', 'phone',
+                         'demoModeEnabled', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // 2. User-owned Sales, Expense, Other & Digital Payment Transactions (IV2 & IV3)
+      match /transactions/{transactionId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(transactionId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(transactionId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'type', 'title', 'category',
+                           'amountKes', 'paymentMethod', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'type', 'title', 'category',
+                           'amountKes', 'paymentMethod', 'transactionRef',
+                           'paymentStatus', 'transactionDate', 'notes',
+                           'customerId', 'customerName', 'inventoryItemId',
+                           'inventoryItemName', 'quantitySold', 'unitPriceKes',
+                           'discountKes', 'costOfGoodsSoldKes', 'receiptNumber',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidBusinessTransaction(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(transactionId) &&
+                         isValidBusinessTransaction(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'type', 'title', 'category', 'amountKes',
+                           'paymentMethod', 'transactionRef', 'paymentStatus',
+                           'transactionDate', 'notes', 'customerId', 'customerName',
+                           'inventoryItemId', 'inventoryItemName', 'quantitySold',
+                           'unitPriceKes', 'discountKes', 'costOfGoodsSoldKes',
+                           'receiptNumber', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(transactionId);
+      }
+
+      // 3. User-owned Computerized Inventory Items (IV3)
+      match /inventory/{itemId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(itemId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(itemId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'name', 'category', 'quantity',
+                           'reorderLevel', 'unitPriceKes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'name', 'sku', 'category', 'quantity',
+                           'reorderLevel', 'unitPriceKes', 'unitCostKes',
+                           'supplierId', 'supplierName', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidInventoryItem(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(itemId) &&
+                         isValidInventoryItem(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'name', 'sku', 'category', 'quantity',
+                           'reorderLevel', 'unitPriceKes', 'unitCostKes',
+                           'supplierId', 'supplierName', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(itemId);
+      }
+
+      // 4. User-owned Customers Directory
+      match /customers/{customerId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(customerId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(customerId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'name', 'totalSpentKes', 'purchaseCount',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'name', 'phone', 'email', 'location',
+                           'notes', 'totalSpentKes', 'purchaseCount',
+                           'lastPurchaseDate', 'createdDate', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidCustomerRecord(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(customerId) &&
+                         isValidCustomerRecord(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'name', 'phone', 'email', 'location', 'notes',
+                           'totalSpentKes', 'purchaseCount', 'lastPurchaseDate',
+                           'createdDate', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(customerId);
+      }
+
+      // 5. User-owned Suppliers Directory
+      match /suppliers/{supplierId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(supplierId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(supplierId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'name', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'name', 'contactPerson', 'phone', 'email',
+                           'location', 'suppliedProductsSummary', 'notes',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidSupplierRecord(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(supplierId) &&
+                         isValidSupplierRecord(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'name', 'contactPerson', 'phone', 'email', 'location',
+                           'suppliedProductsSummary', 'notes', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(supplierId);
+      }
+
+      // 6. User-owned Stock Purchases & Supplier Payables
+      match /purchases/{purchaseId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(purchaseId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(purchaseId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'itemName', 'quantity', 'unitCostKes',
+                           'totalCostKes', 'paymentMethod', 'paymentStatus',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'supplierId', 'supplierName', 'inventoryItemId',
+                           'itemName', 'quantity', 'unitCostKes', 'totalCostKes',
+                           'paymentMethod', 'paymentStatus', 'purchaseDate', 'notes',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidPurchaseOrderRecord(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(purchaseId) &&
+                         isValidPurchaseOrderRecord(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'supplierId', 'supplierName', 'inventoryItemId', 'itemName',
+                           'quantity', 'unitCostKes', 'totalCostKes', 'paymentMethod',
+                           'paymentStatus', 'purchaseDate', 'notes', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(purchaseId);
+      }
+
+      // 7. User-owned Stock Movement History
+      match /stockMovements/{movementId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(movementId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(movementId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'inventoryItemId', 'itemName', 'movementType',
+                           'quantityDelta', 'balanceAfter', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'inventoryItemId', 'itemName', 'movementType',
+                           'quantityDelta', 'balanceAfter', 'referenceId',
+                           'unitCostKes', 'totalCostKes', 'supplierId', 'supplierName',
+                           'movementDate', 'notes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidStockMovementRecord(incoming(), userId);
+
+        allow update: if false;
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(movementId);
+      }
+
+      // 8. User-owned Digital Marketing Campaigns (IV1)
+      match /campaigns/{campaignId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(campaignId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(campaignId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'title', 'channel', 'spendKes', 'reachCount',
+                           'engagementCount', 'inquiriesGenerated', 'status',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'title', 'channel', 'campaignDate', 'spendKes',
+                           'reachCount', 'engagementCount', 'inquiriesGenerated',
+                           'status', 'notes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidDigitalMarketingCampaign(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(campaignId) &&
+                         isValidDigitalMarketingCampaign(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'channel', 'campaignDate', 'spendKes',
+                           'reachCount', 'engagementCount', 'inquiriesGenerated',
+                           'status', 'notes', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(campaignId);
+      }
+
+      // 9. User-owned Online Customer Communication Logs (IV4)
+      match /communications/{commId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(commId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(commId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'customerName', 'channel', 'subject',
+                           'status', 'responseMinutes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'customerName', 'channel', 'category', 'subject',
+                           'receivedDate', 'responseDate', 'status',
+                           'responseMinutes', 'notes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidOnlineCommunicationLog(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(commId) &&
+                         isValidOnlineCommunicationLog(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'customerName', 'channel', 'category', 'subject',
+                           'receivedDate', 'responseDate', 'status',
+                           'responseMinutes', 'notes', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(commId);
+      }
+    }
+  }
+}

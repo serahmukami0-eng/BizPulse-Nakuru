@@ -1,0 +1,380 @@
+{
+  "entities": {
+    "BusinessProfile": {
+      "title": "BusinessProfile",
+      "description": "SME business profile and workspace configuration for a Nakuru Town or Kenyan enterprise.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID of the business owner."
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Full name of the SME owner or manager."
+        },
+        "businessName": {
+          "type": "string",
+          "description": "Registered or trading name of the SME."
+        },
+        "businessType": {
+          "type": "string",
+          "description": "SME category such as Retail Shop, Boutique, Salon, Restaurant, Wholesaler, or Mini-Supermarket."
+        },
+        "locationNakuru": {
+          "type": "string",
+          "description": "Business location in Nakuru Town, Kenya, or another specified area."
+        },
+        "businessSize": {
+          "type": "string",
+          "description": "Enterprise size tier (Micro, Small, Medium)."
+        },
+        "phone": {
+          "type": "string",
+          "description": "Business contact phone or M-Pesa number."
+        },
+        "currency": {
+          "type": "string",
+          "description": "Default operating currency code (KES)."
+        },
+        "demoModeEnabled": {
+          "type": "boolean",
+          "description": "Whether the dashboard displays clearly labeled DEMO DATA preview when live records are empty."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated creation timestamp via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated last update timestamp via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "ownerName",
+        "businessName",
+        "businessType",
+        "locationNakuru",
+        "currency",
+        "demoModeEnabled",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BusinessTransaction": {
+      "title": "BusinessTransaction",
+      "description": "Digital payment, POS sale with optional linked inventory & customer, expense, or other computerized ledger entry denominated in KES.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["SALE", "EXPENSE", "OTHER"]
+        },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "amountKes": { "type": "number" },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["M-PESA", "BANK", "CARD", "OTHER_DIGITAL", "CASH"]
+        },
+        "transactionRef": { "type": "string" },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["COMPLETED", "PENDING", "FAILED", "CANCELLED"]
+        },
+        "transactionDate": { "type": "string" },
+        "notes": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "inventoryItemId": { "type": "string" },
+        "inventoryItemName": { "type": "string" },
+        "quantitySold": { "type": "integer" },
+        "unitPriceKes": { "type": "number" },
+        "discountKes": { "type": "number" },
+        "costOfGoodsSoldKes": { "type": "number" },
+        "receiptNumber": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "type",
+        "title",
+        "category",
+        "amountKes",
+        "paymentMethod",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "Computerized inventory record tracked by the SME with KES selling price, optional unit cost, supplier link, and reorder threshold.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "sku": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "integer" },
+        "reorderLevel": { "type": "integer" },
+        "unitPriceKes": { "type": "number" },
+        "unitCostKes": { "type": "number" },
+        "supplierId": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "name",
+        "category",
+        "quantity",
+        "reorderLevel",
+        "unitPriceKes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CustomerRecord": {
+      "title": "CustomerRecord",
+      "description": "Customer CRM profile tracking contact info, cumulative spend, purchase frequency, and repeat-customer metrics.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "location": { "type": "string" },
+        "notes": { "type": "string" },
+        "totalSpentKes": { "type": "number" },
+        "purchaseCount": { "type": "integer" },
+        "lastPurchaseDate": { "type": "string" },
+        "createdDate": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "name",
+        "totalSpentKes",
+        "purchaseCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SupplierRecord": {
+      "title": "SupplierRecord",
+      "description": "Supplier contact profile and supplied products summary for restock procurement.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "contactPerson": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "location": { "type": "string" },
+        "suppliedProductsSummary": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "name",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PurchaseOrderRecord": {
+      "title": "PurchaseOrderRecord",
+      "description": "Stock purchase and supplier payable record linked to inventory restock and settlement status.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "inventoryItemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "quantity": { "type": "integer" },
+        "unitCostKes": { "type": "number" },
+        "totalCostKes": { "type": "number" },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["M-PESA", "BANK", "CARD", "OTHER_DIGITAL", "CASH"]
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["PAID", "PENDING", "PARTIAL"]
+        },
+        "purchaseDate": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "itemName",
+        "quantity",
+        "unitCostKes",
+        "totalCostKes",
+        "paymentMethod",
+        "paymentStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StockMovementRecord": {
+      "title": "StockMovementRecord",
+      "description": "Audit log of inventory quantity deductions, restock purchases, reversals, and manual adjustments.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "inventoryItemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "movementType": {
+          "type": "string",
+          "enum": ["SALE_DEDUCTION", "PURCHASE_RESTOCK", "MANUAL_ADJUSTMENT", "SALE_REVERSAL"]
+        },
+        "quantityDelta": { "type": "integer" },
+        "balanceAfter": { "type": "integer" },
+        "referenceId": { "type": "string" },
+        "unitCostKes": { "type": "number" },
+        "totalCostKes": { "type": "number" },
+        "supplierId": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "movementDate": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "inventoryItemId",
+        "itemName",
+        "movementType",
+        "quantityDelta",
+        "balanceAfter",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DigitalMarketingCampaign": {
+      "title": "DigitalMarketingCampaign",
+      "description": "Research IV1: Digital marketing campaign activity, date, expenditure in KES, reach, engagement, and enquiries.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "channel": {
+          "type": "string",
+          "enum": ["FACEBOOK", "INSTAGRAM", "WHATSAPP_STATUS", "TIKTOK", "GOOGLE_MAPS", "SMS"]
+        },
+        "campaignDate": { "type": "string" },
+        "spendKes": { "type": "number" },
+        "reachCount": { "type": "integer" },
+        "engagementCount": { "type": "integer" },
+        "inquiriesGenerated": { "type": "integer" },
+        "status": {
+          "type": "string",
+          "enum": ["ACTIVE", "PAUSED", "COMPLETED"]
+        },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "title",
+        "channel",
+        "spendKes",
+        "reachCount",
+        "engagementCount",
+        "inquiriesGenerated",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "OnlineCommunicationLog": {
+      "title": "OnlineCommunicationLog",
+      "description": "Research IV4: Customer online communication record, inquiry/complaint category, channel, dates, response time, and notes.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "channel": {
+          "type": "string",
+          "enum": ["WHATSAPP", "FACEBOOK_DM", "INSTAGRAM_DM", "EMAIL", "SMS", "WEB_CHAT", "OTHER"]
+        },
+        "category": {
+          "type": "string",
+          "enum": ["INQUIRY", "COMPLAINT", "ORDER_UPDATE", "FEEDBACK"]
+        },
+        "subject": { "type": "string" },
+        "receivedDate": { "type": "string" },
+        "responseDate": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "RESPONDED", "CONVERTED"]
+        },
+        "responseMinutes": { "type": "integer" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "customerName",
+        "channel",
+        "subject",
+        "status",
+        "responseMinutes",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/BusinessProfile" },
+      "description": "User-owned SME business profile and workspace settings."
+    },
+    "/users/{userId}/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/BusinessTransaction" },
+      "description": "User-owned KES digital payments and computerized sales/expense/other records (IV2 & IV3)."
+    },
+    "/users/{userId}/inventory/{itemId}": {
+      "schema": { "$ref": "#/entities/InventoryItem" },
+      "description": "User-owned computerized inventory catalog (IV3 & Operational Efficiency)."
+    },
+    "/users/{userId}/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/CustomerRecord" },
+      "description": "User-owned SME customer directory and cumulative spend tracking."
+    },
+    "/users/{userId}/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/SupplierRecord" },
+      "description": "User-owned supplier contacts and procurement directory."
+    },
+    "/users/{userId}/purchases/{purchaseId}": {
+      "schema": { "$ref": "#/entities/PurchaseOrderRecord" },
+      "description": "User-owned stock purchase orders and pending/paid supplier balances."
+    },
+    "/users/{userId}/stockMovements/{movementId}": {
+      "schema": { "$ref": "#/entities/StockMovementRecord" },
+      "description": "User-owned stock movement audit log for deductions and restocks."
+    },
+    "/users/{userId}/campaigns/{campaignId}": {
+      "schema": { "$ref": "#/entities/DigitalMarketingCampaign" },
+      "description": "User-owned digital marketing campaign records (IV1)."
+    },
+    "/users/{userId}/communications/{commId}": {
+      "schema": { "$ref": "#/entities/OnlineCommunicationLog" },
+      "description": "User-owned online customer communication logs (IV4)."
+    }
+  }
+}
