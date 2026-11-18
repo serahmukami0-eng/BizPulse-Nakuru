@@ -81,6 +81,7 @@ import com.example.data.model.DigitalMarketingCampaign
 import com.example.data.model.InventoryItem
 import com.example.data.model.NakuruSmeCatalog
 import com.example.data.model.OnlineCommunicationLog
+import com.example.data.model.PosCartLineItem
 import com.example.data.model.StockMovementRecord
 import com.example.data.model.SupplierRecord
 import com.example.data.model.formatKes
@@ -696,6 +697,18 @@ fun RecordKeepingScreen(
     ) -> Unit = { title, cat, method, ref, status, date, notes, _, _, _, _, _, _, manualAmt ->
         onAddTransaction(BusinessTransaction.TYPE_SALE, title, cat, manualAmt, method, ref, status, date, notes)
     },
+    onRecordPosCart: (
+        cartItems: List<PosCartLineItem>,
+        defaultCategory: String,
+        paymentMethod: String,
+        transactionRef: String,
+        paymentStatus: String,
+        transactionDate: String,
+        notes: String,
+        customerId: String,
+        customerName: String,
+        cartDiscountText: String
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _ -> },
     onCancelSale: (BusinessTransaction) -> Unit = {},
     onUpdateTransaction: (
         transactionId: String,
@@ -1273,6 +1286,10 @@ fun RecordKeepingScreen(
             onConfirmPosSale = { title, cat, method, ref, status, date, notes, custId, custName, invId, qtyText, unitPriceText, discText, manualAmt ->
                 onRecordPosSale(title, cat, method, ref, status, date, notes, custId, custName, invId, qtyText, unitPriceText, discText, manualAmt)
                 showPosSaleDialog = false
+            },
+            onConfirmPosCart = { cartItems, defaultCategory, method, ref, status, date, notes, custId, custName, cartDiscText ->
+                onRecordPosCart(cartItems, defaultCategory, method, ref, status, date, notes, custId, custName, cartDiscText)
+                showPosSaleDialog = false
             }
         )
     }
@@ -1302,8 +1319,17 @@ fun RecordKeepingScreen(
     }
 
     receiptTransaction?.let { target ->
+        val groupedReceiptItems = remember(target, txSource) {
+            if (target.receiptNumber.isNotBlank()) {
+                txSource.filter { it.receiptNumber == target.receiptNumber && !it.isCancelled() }
+                    .ifEmpty { listOf(target) }
+            } else {
+                listOf(target)
+            }
+        }
         ReceiptPreviewDialog(
             transaction = target,
+            receiptItems = groupedReceiptItems,
             businessName = summary.businessName,
             businessLocation = summary.locationNakuru,
             onDismiss = { receiptTransaction = null }

@@ -8,6 +8,10 @@ import com.example.data.analytics.Prompt4AnalyticsBundle
 import com.example.data.analytics.Prompt4ForecastingEngine
 import com.example.data.analytics.SmeAnalyticsEngine
 import com.example.data.analytics.SmeFullAnalyticsReport
+import com.example.data.backup.BackupSummary
+import com.example.data.backup.ProjectXBackupManager
+import com.example.data.backup.ValidatedWorkspaceBackup
+import com.example.data.backup.WorkspaceBackupPayload
 import com.example.data.model.AnalyticsDateFilter
 import com.example.data.model.BusinessProfile
 import com.example.data.model.BusinessTransaction
@@ -16,6 +20,7 @@ import com.example.data.model.DemoSampleData
 import com.example.data.model.DigitalMarketingCampaign
 import com.example.data.model.InventoryItem
 import com.example.data.model.OnlineCommunicationLog
+import com.example.data.model.PosCartLineItem
 import com.example.data.model.PurchaseOrderRecord
 import com.example.data.model.RegistrationDraft
 import com.example.data.model.StockMovementRecord
@@ -87,6 +92,18 @@ data class AiChatMessage(
     val isUser: Boolean,
     val text: String
 )
+
+sealed interface BackupRestoreUiState {
+    data object Idle : BackupRestoreUiState
+    data object Exporting : BackupRestoreUiState
+    data class ReadyToConfirmRestore(
+        val backup: ValidatedWorkspaceBackup,
+        val sourceLabel: String
+    ) : BackupRestoreUiState
+    data object Restoring : BackupRestoreUiState
+    data class Success(val message: String) : BackupRestoreUiState
+    data class Error(val message: String) : BackupRestoreUiState
+}
 
 data class DashboardSummary(
     val isDemoMode: Boolean,
@@ -576,6 +593,20 @@ class DashboardViewModel(
     private val _isSaving = MutableStateFlow(false)
     val isSaving: StateFlow<Boolean> = _isSaving.asStateFlow()
 
+    private val _backupRestoreState = MutableStateFlow<BackupRestoreUiState>(BackupRestoreUiState.Idle)
+    val backupRestoreState: StateFlow<BackupRestoreUiState> = _backupRestoreState.asStateFlow()
+
+    private val _latestPosReceipt = MutableStateFlow<List<BusinessTransaction>?>(null)
+    val latestPosReceipt: StateFlow<List<BusinessTransaction>?> = _latestPosReceipt.asStateFlow()
+
+    val hasPendingSyncWrites: StateFlow<Boolean> =
+        repository.observeHasPendingWrites(currentUserId)
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+                initialValue = false
+            )
+
     val roomOverviewState: StateFlow<RoomBusinessOverviewState> =
         (localOverviewRepository?.observeOverviewKpis(currentUserId)
             ?: flowOf(RoomBusinessOverviewState()))
@@ -734,6 +765,7 @@ class DashboardViewModel(
         phone: String,
         demoModeEnabled: Boolean
     ) {
+        if (_isSaving.value) return
         if (ownerName.isBlank() || businessName.isBlank() || locationNakuru.isBlank()) {
             _actionMessage.value = "Please enter owner name, business name, and location."
             return
@@ -769,6 +801,7 @@ class DashboardViewModel(
         transactionDate: String = com.example.data.model.todayIsoDate(),
         notes: String = ""
     ) {
+        if (_isSaving.value) return
         val amount = amountText.trim().toDoubleOrNull()
         if (title.isBlank() || amount == null || amount <= 0.0) {
             _actionMessage.value = "Enter a valid description and positive KES amount."
@@ -817,6 +850,7 @@ class DashboardViewModel(
         transactionDate: String,
         notes: String
     ) {
+        if (_isSaving.value) return
         val amount = amountText.trim().toDoubleOrNull()
         if (title.isBlank() || amount == null || amount <= 0.0) {
             _actionMessage.value = "Enter a valid description and positive KES amount."
@@ -865,6 +899,7 @@ class DashboardViewModel(
         discountText: String,
         manualAmountText: String
     ) {
+        if (_isSaving.value) return
         val qty = quantityText.trim().toLongOrNull() ?: 1L
         val unitPrice = unitPriceText.trim().toDoubleOrNull() ?: 0.0
         val discount = discountText.trim().toDoubleOrNull() ?: 0.0
@@ -887,9 +922,30 @@ class DashboardViewModel(
         }
         viewModelScope.launch {
             _isSaving.value = true
-            val result = repository.recordSaleWithInventory(
-                title = title,
-                category = category,
+            val lineItem = if (inventoryItemId.isNotBlank()) {
+                PosCartLineItem(
+                    lineId = "single_1",
+                    inventoryItemId = inventoryItemId,
+                    itemName = title.ifBlank { "POS Item" },
+                    category = category,
+                    quantity = qty,
+                    unitPriceKes = unitPrice,
+                    lineDiscountKes = discount
+                )
+            } else {
+                PosCartLineItem(
+                    lineId = "single_1",
+                    inventoryItemId = "",
+                    itemName = title,
+                    category = category,
+                    quantity = 1L,
+                    unitPriceKes = manualAmount,
+                    lineDiscountKes = discount
+                )
+            }
+            val result = repository.recordMultiItemPosCart(
+                cartItems = listOf(lineItem),
+                defaultCategory = category,
                 paymentMethod = paymentMethod,
                 transactionRef = transactionRef,
                 paymentStatus = paymentStatus,
@@ -897,19 +953,80 @@ class DashboardViewModel(
                 notes = notes,
                 customerId = customerId,
                 customerName = customerName,
-                inventoryItemId = inventoryItemId,
-                quantitySold = qty,
-                unitPriceKes = unitPrice,
-                discountKes = discount,
-                manualAmountKes = manualAmount
+                cartDiscountKes = 0.0
             )
             _isSaving.value = false
-            _actionMessage.value = if (result.isSuccess) {
-                if (inventoryItemId.isNotBlank()) "POS sale recorded & stock updated." else "Sale recorded."
+            if (result.isSuccess) {
+                val created = result.getOrNull().orEmpty()
+                if (created.isNotEmpty()) {
+                    _latestPosReceipt.value = created
+                }
+                _actionMessage.value = if (inventoryItemId.isNotBlank()) {
+                    "POS sale recorded & stock updated."
+                } else {
+                    "Sale recorded."
+                }
             } else {
-                result.exceptionOrNull()?.localizedMessage ?: "Failed to record POS sale."
+                _actionMessage.value = result.exceptionOrNull()?.localizedMessage ?: "Failed to record POS sale."
             }
         }
+    }
+
+    fun recordPosCartSale(
+        cartItems: List<PosCartLineItem>,
+        defaultCategory: String,
+        paymentMethod: String,
+        transactionRef: String,
+        paymentStatus: String,
+        transactionDate: String,
+        notes: String,
+        customerId: String,
+        customerName: String,
+        cartDiscountText: String
+    ) {
+        if (_isSaving.value) return
+        if (cartItems.isEmpty()) {
+            _actionMessage.value = "Add at least one item to the POS cart."
+            return
+        }
+        val cartDiscount = cartDiscountText.trim().toDoubleOrNull() ?: 0.0
+        if (cartDiscount < 0.0) {
+            _actionMessage.value = "Cart discount cannot be negative."
+            return
+        }
+        if (!isValidIsoDate(transactionDate)) {
+            _actionMessage.value = "Use YYYY-MM-DD format for sale date."
+            return
+        }
+        viewModelScope.launch {
+            _isSaving.value = true
+            val result = repository.recordMultiItemPosCart(
+                cartItems = cartItems,
+                defaultCategory = defaultCategory,
+                paymentMethod = paymentMethod,
+                transactionRef = transactionRef,
+                paymentStatus = paymentStatus,
+                transactionDate = transactionDate,
+                notes = notes,
+                customerId = customerId,
+                customerName = customerName,
+                cartDiscountKes = cartDiscount
+            )
+            _isSaving.value = false
+            if (result.isSuccess) {
+                val created = result.getOrNull().orEmpty()
+                if (created.isNotEmpty()) {
+                    _latestPosReceipt.value = created
+                }
+                _actionMessage.value = "Multi-item POS sale (${created.size} line(s)) recorded & stock updated."
+            } else {
+                _actionMessage.value = result.exceptionOrNull()?.localizedMessage ?: "Failed to record POS cart sale."
+            }
+        }
+    }
+
+    fun dismissLatestPosReceipt() {
+        _latestPosReceipt.value = null
     }
 
     fun cancelSaleTransaction(tx: BusinessTransaction) {
@@ -947,6 +1064,7 @@ class DashboardViewModel(
         supplierId: String = "",
         supplierName: String = ""
     ) {
+        if (_isSaving.value) return
         val qty = quantityText.trim().toLongOrNull()
         val reorder = reorderLevelText.trim().toLongOrNull() ?: 5L
         val price = unitPriceText.trim().toDoubleOrNull()
@@ -989,6 +1107,7 @@ class DashboardViewModel(
         supplierId: String = "",
         supplierName: String = ""
     ) {
+        if (_isSaving.value) return
         val qty = quantityText.trim().toLongOrNull()
         val reorder = reorderLevelText.trim().toLongOrNull() ?: 5L
         val price = unitPriceText.trim().toDoubleOrNull()
@@ -1062,6 +1181,7 @@ class DashboardViewModel(
         notes: String,
         logAsExpense: Boolean
     ) {
+        if (_isSaving.value) return
         val qty = quantityText.trim().toLongOrNull()
         val unitCost = unitCostText.trim().toDoubleOrNull()
         if (itemName.isBlank() || qty == null || qty <= 0L || unitCost == null || unitCost < 0.0) {
@@ -1113,6 +1233,7 @@ class DashboardViewModel(
     }
 
     fun addCustomer(name: String, phone: String, email: String, location: String, notes: String) {
+        if (_isSaving.value) return
         if (name.isBlank()) {
             _actionMessage.value = "Customer name is required."
             return
@@ -1127,6 +1248,7 @@ class DashboardViewModel(
     }
 
     fun updateCustomer(id: String, name: String, phone: String, email: String, location: String, notes: String) {
+        if (_isSaving.value) return
         if (name.isBlank()) {
             _actionMessage.value = "Customer name is required."
             return
@@ -1157,6 +1279,7 @@ class DashboardViewModel(
         suppliedProductsSummary: String,
         notes: String
     ) {
+        if (_isSaving.value) return
         if (name.isBlank()) {
             _actionMessage.value = "Supplier name is required."
             return
@@ -1180,6 +1303,7 @@ class DashboardViewModel(
         suppliedProductsSummary: String,
         notes: String
     ) {
+        if (_isSaving.value) return
         if (name.isBlank()) {
             _actionMessage.value = "Supplier name is required."
             return
@@ -1212,6 +1336,7 @@ class DashboardViewModel(
         status: String,
         notes: String
     ) {
+        if (_isSaving.value) return
         val spend = spendText.trim().toDoubleOrNull() ?: 0.0
         val reach = reachText.trim().toLongOrNull() ?: 0L
         val engagement = engagementText.trim().toLongOrNull() ?: 0L
@@ -1258,6 +1383,7 @@ class DashboardViewModel(
         status: String,
         notes: String
     ) {
+        if (_isSaving.value) return
         val spend = spendText.trim().toDoubleOrNull() ?: 0.0
         val reach = reachText.trim().toLongOrNull() ?: 0L
         val engagement = engagementText.trim().toLongOrNull() ?: 0L
@@ -1315,6 +1441,7 @@ class DashboardViewModel(
         notes: String,
         category: String = OnlineCommunicationLog.CATEGORY_INQUIRY
     ) {
+        if (_isSaving.value) return
         val responseMinutes = responseMinutesText.trim().toLongOrNull() ?: 0L
         if (customerName.isBlank() || subject.isBlank() || responseMinutes < 0L) {
             _actionMessage.value = "Enter customer name, inquiry subject, and valid response minutes."
@@ -1358,6 +1485,7 @@ class DashboardViewModel(
         notes: String,
         category: String = OnlineCommunicationLog.CATEGORY_INQUIRY
     ) {
+        if (_isSaving.value) return
         val responseMinutes = responseMinutesText.trim().toLongOrNull() ?: 0L
         if (customerName.isBlank() || subject.isBlank() || responseMinutes < 0L) {
             _actionMessage.value = "Enter customer name, inquiry subject, and valid response minutes."
@@ -1581,6 +1709,113 @@ class DashboardViewModel(
                 )
             }
         }
+    }
+
+    fun generateWorkspaceBackupJson(
+        onResult: (Result<Pair<String, BackupSummary>>) -> Unit
+    ) {
+        if (_isSaving.value) return
+        viewModelScope.launch {
+            _isSaving.value = true
+            _backupRestoreState.value = BackupRestoreUiState.Exporting
+            val snapshotRes = repository.fetchWorkspaceBackupSnapshot(currentUserId)
+            val payload = snapshotRes.getOrElse {
+                // Fallback to currently synced live StateFlows if offline/timed out
+                WorkspaceBackupPayload(
+                    profile = (profileState.value as? UiState.Success)?.data,
+                    transactions = (transactionsState.value as? UiState.Success)?.data.orEmpty(),
+                    inventory = (inventoryState.value as? UiState.Success)?.data.orEmpty(),
+                    customers = (customersState.value as? UiState.Success)?.data.orEmpty(),
+                    suppliers = (suppliersState.value as? UiState.Success)?.data.orEmpty(),
+                    purchases = (purchasesState.value as? UiState.Success)?.data.orEmpty(),
+                    stockMovements = (stockMovementsState.value as? UiState.Success)?.data.orEmpty(),
+                    campaigns = (campaignsState.value as? UiState.Success)?.data.orEmpty(),
+                    communications = (communicationsState.value as? UiState.Success)?.data.orEmpty()
+                )
+            }
+            val json = ProjectXBackupManager.serializeWorkspaceBackup(payload)
+            val parsed = ProjectXBackupManager.parseAndValidateBackup(json)
+            _isSaving.value = false
+            if (parsed.isSuccess) {
+                val summary = parsed.getOrThrow().summary
+                _backupRestoreState.value = BackupRestoreUiState.Success(
+                    "Backup ready: ${summary.totalRecords} live record(s) exported."
+                )
+                onResult(Result.success(json to summary))
+            } else {
+                val errMsg = if (payload.profile == null &&
+                    payload.transactions.isEmpty() &&
+                    payload.inventory.isEmpty() &&
+                    payload.customers.isEmpty() &&
+                    payload.suppliers.isEmpty() &&
+                    payload.purchases.isEmpty() &&
+                    payload.campaigns.isEmpty() &&
+                    payload.communications.isEmpty()
+                ) {
+                    "No live business records found to back up yet."
+                } else {
+                    parsed.exceptionOrNull()?.localizedMessage ?: "Failed to generate backup."
+                }
+                _backupRestoreState.value = BackupRestoreUiState.Error(errMsg)
+                onResult(Result.failure(IllegalStateException(errMsg)))
+            }
+        }
+    }
+
+    fun reportBackupExportOutcome(success: Boolean, message: String) {
+        _backupRestoreState.value = if (success) {
+            BackupRestoreUiState.Success(message)
+        } else {
+            BackupRestoreUiState.Error(message)
+        }
+        _actionMessage.value = message
+    }
+
+    fun inspectBackupFileJson(rawJson: String, sourceLabel: String) {
+        val parsed = ProjectXBackupManager.parseAndValidateBackup(rawJson)
+        if (parsed.isSuccess) {
+            _backupRestoreState.value = BackupRestoreUiState.ReadyToConfirmRestore(
+                backup = parsed.getOrThrow(),
+                sourceLabel = sourceLabel
+            )
+        } else {
+            val errMsg = parsed.exceptionOrNull()?.localizedMessage ?: "Invalid Project X backup file."
+            _backupRestoreState.value = BackupRestoreUiState.Error(errMsg)
+            _actionMessage.value = errMsg
+        }
+    }
+
+    fun confirmRestoreBackup(replaceExisting: Boolean) {
+        val ready = _backupRestoreState.value as? BackupRestoreUiState.ReadyToConfirmRestore ?: return
+        if (_isSaving.value) return
+        viewModelScope.launch {
+            _isSaving.value = true
+            _backupRestoreState.value = BackupRestoreUiState.Restoring
+            val res = repository.restoreWorkspaceBackup(
+                backup = ready.backup,
+                replaceExisting = replaceExisting
+            )
+            _isSaving.value = false
+            if (res.isSuccess) {
+                val summary = res.getOrThrow()
+                val modeLabel = if (replaceExisting) "replaced existing workspace with" else "merged"
+                val msg = "Restore complete: $modeLabel ${summary.totalRecords} record(s)."
+                _backupRestoreState.value = BackupRestoreUiState.Success(msg)
+                _actionMessage.value = msg
+            } else {
+                val msg = res.exceptionOrNull()?.localizedMessage ?: "Failed to restore workspace backup."
+                _backupRestoreState.value = BackupRestoreUiState.Error(msg)
+                _actionMessage.value = msg
+            }
+        }
+    }
+
+    fun dismissRestoreConfirmation() {
+        _backupRestoreState.value = BackupRestoreUiState.Idle
+    }
+
+    fun clearBackupRestoreState() {
+        _backupRestoreState.value = BackupRestoreUiState.Idle
     }
 
     private fun unwrapFirestoreError(error: Throwable): Throwable {

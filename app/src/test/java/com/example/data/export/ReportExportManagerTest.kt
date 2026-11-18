@@ -5,6 +5,7 @@ import com.example.data.analytics.Prompt4ForecastingEngine
 import com.example.data.analytics.SmeAnalyticsEngine
 import com.example.data.model.DemoSampleData
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -12,7 +13,7 @@ import java.io.ByteArrayOutputStream
 class ReportExportManagerTest {
 
     @Test
-    fun generateReport_all11ReportTypes_produceValidCsvContent() {
+    fun generateReport_all12ReportTypes_produceValidCsvContent() {
         val txs = DemoSampleData.sampleTransactions
         val inv = DemoSampleData.sampleInventory
         val cust = DemoSampleData.sampleCustomers
@@ -59,10 +60,25 @@ class ReportExportManagerTest {
             val csvOut = ByteArrayOutputStream()
             ReportExportManager.writeCsvToStream(report, csvOut)
             val csvText = csvOut.toString(Charsets.UTF_8.name())
-            assertTrue("${reportType.name} CSV header missing", csvText.contains("Nakuru Fresh Mart"))
-            assertTrue("${reportType.name} CSV DEMO tag missing", csvText.contains("DEMO SAMPLE DATA"))
+
+            if (reportType == BusinessReportType.RESEARCH_DATASET_SPSS) {
+                val lines = csvText.lines().filter { it.isNotBlank() }
+                assertTrue(
+                    "SPSS CSV header row missing (was: ${lines.firstOrNull()})",
+                    lines.first().startsWith("Record_Scope,Period_Label,SME_Code,Nakuru_Location,Data_Mode")
+                )
+                assertFalse("SPSS CSV must not contain # comment lines", lines.any { it.startsWith("#") })
+                assertFalse("SPSS CSV must anonymize real business name", csvText.contains("Nakuru Fresh Mart"))
+                assertTrue("SPSS CSV must contain SME- code", csvText.contains("SME-"))
+                assertTrue("SPSS CSV must contain OVERALL_WINDOW", csvText.contains("OVERALL_WINDOW"))
+                assertTrue("SPSS CSV must contain MONTHLY_PANEL", csvText.contains("MONTHLY_PANEL"))
+                assertTrue("SPSS CSV must contain IV/DV headers", lines.first().contains("DV_Sales_Revenue_KES"))
+            } else {
+                assertTrue("${reportType.name} CSV header missing", csvText.contains("Nakuru Fresh Mart"))
+                assertTrue("${reportType.name} CSV DEMO tag missing", csvText.contains("DEMO SAMPLE DATA"))
+            }
         }
 
-        assertEquals(11, BusinessReportType.entries.size)
+        assertEquals(12, BusinessReportType.entries.size)
     }
 }

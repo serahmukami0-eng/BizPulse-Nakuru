@@ -42,7 +42,8 @@ enum class BusinessReportType(val title: String, val description: String) {
     CUSTOMER_REPORT("Customer Report", "Directory, spend & repeat customer tracking"),
     DIGITAL_MARKETING_REPORT("Digital Marketing Report", "IV1 campaigns, spend, reach & cost/enquiry"),
     DIGITAL_PAYMENT_REPORT("Digital Payment Report", "IV2 M-Pesa, bank, card & cash share"),
-    OVERALL_PERFORMANCE("Overall Business Performance", "Research-aligned SME summary (IV1–IV4 → DV)")
+    OVERALL_PERFORMANCE("Overall Business Performance", "Research-aligned SME summary (IV1–IV4 → DV)"),
+    RESEARCH_DATASET_SPSS("Research Dataset (SPSS / Excel)", "Anonymized Chapter 4 quantitative CSV across IV1–IV4 & DV")
 }
 
 data class GeneratedBusinessReport(
@@ -399,6 +400,174 @@ object ReportExportManager {
                     footerNote = buildFooterNote(isDemoData)
                 )
             }
+
+            BusinessReportType.RESEARCH_DATASET_SPSS -> {
+                val smeCode = "SME-${(kotlin.math.abs(businessName.hashCode()) % 9000) + 1000}"
+                val dataMode = if (isDemoData) "DEMO_SAMPLE" else "LIVE_FIRESTORE"
+                val columns = listOf(
+                    "Record_Scope",
+                    "Period_Label",
+                    "SME_Code",
+                    "Nakuru_Location",
+                    "Data_Mode",
+                    "IV1_Campaign_Count",
+                    "IV1_Marketing_Spend_KES",
+                    "IV1_Reach",
+                    "IV1_Engagement",
+                    "IV1_Enquiries_Generated",
+                    "IV1_Cost_Per_Enquiry_KES",
+                    "IV2_Digital_Tx_Count",
+                    "IV2_Total_Tx_Count",
+                    "IV2_Digital_Adoption_Pct",
+                    "IV2_Mpesa_Sales_KES",
+                    "IV2_Total_Digital_KES",
+                    "IV2_Digital_Sales_Share_Pct",
+                    "IV3_Active_Ledger_Count",
+                    "IV3_Record_Completeness_Pct",
+                    "IV3_Inventory_SKUs",
+                    "IV3_Low_Stock_Count",
+                    "IV4_Enquiries_Logged",
+                    "IV4_Responded_Or_Converted",
+                    "IV4_Response_Rate_Pct",
+                    "IV4_Avg_Response_Minutes",
+                    "DV_Sales_Revenue_KES",
+                    "DV_Operating_Expenses_KES",
+                    "DV_Estimated_Net_Profit_KES",
+                    "DV_Gross_Profit_KES",
+                    "DV_MoM_Sales_Growth_Pct",
+                    "DV_Customer_Count",
+                    "DV_Repeat_Customer_Count",
+                    "Pearson_r_DigitalPay_vs_Sales",
+                    "Pearson_r_Mktg_vs_Sales",
+                    "Pearson_r_Comms_vs_Sales"
+                )
+                val rDigital = analytics.researchComparisons.find { it.variableCode == "IV2 → DV" }?.correlationR
+                val rMktg = analytics.researchComparisons.find { it.variableCode == "IV1 → DV" }?.correlationR
+                val rComm = analytics.researchComparisons.find { it.variableCode == "IV4 → DV" }?.correlationR
+
+                val mpesaSalesTotal = activeSales
+                    .filter { it.paymentMethod == BusinessTransaction.METHOD_MPESA }
+                    .sumOf { it.amountKes }
+
+                val respondedOrConvertedComms =
+                    analytics.communication.respondedEnquiries + analytics.communication.convertedEnquiries
+
+                val overallRow = listOf(
+                    "OVERALL_WINDOW",
+                    analytics.activeWindow.label,
+                    smeCode,
+                    location,
+                    dataMode,
+                    analytics.marketing.campaignCount.toString(),
+                    String.format(Locale.US, "%.2f", analytics.marketing.totalSpendKes),
+                    analytics.marketing.totalReach.toString(),
+                    analytics.marketing.totalEngagement.toString(),
+                    analytics.marketing.totalInquiries.toString(),
+                    analytics.marketing.costPerInquiryKes?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                    analytics.payments.digitalTransactionCount.toString(),
+                    analytics.payments.totalTransactionCount.toString(),
+                    analytics.payments.digitalAdoptionPct?.toString() ?: "",
+                    String.format(Locale.US, "%.2f", mpesaSalesTotal),
+                    String.format(Locale.US, "%.2f", analytics.payments.totalDigitalPaymentsKes),
+                    analytics.payments.digitalAsPercentOfSales?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                    analytics.recordKeeping.totalTransactionsCount.toString(),
+                    analytics.recordKeeping.recordCompletenessPct?.toString() ?: "",
+                    inventory.size.toString(),
+                    inventory.count { it.isLowStock }.toString(),
+                    analytics.communication.totalEnquiries.toString(),
+                    respondedOrConvertedComms.toString(),
+                    analytics.communication.responseRatePct?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                    analytics.communication.avgResponseMinutes?.toString() ?: "",
+                    String.format(Locale.US, "%.2f", analytics.recordKeeping.recordedSalesKes),
+                    String.format(Locale.US, "%.2f", analytics.recordKeeping.recordedExpensesKes),
+                    String.format(Locale.US, "%.2f", analytics.recordKeeping.estimatedNetProfitKes),
+                    prompt4.totalGrossProfitKes?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                    prompt4.latestMoMSalesGrowthPct?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                    customers.size.toString(),
+                    prompt4.repeatCustomerCount.toString(),
+                    rDigital?.let { String.format(Locale.US, "%.4f", it) } ?: "",
+                    rMktg?.let { String.format(Locale.US, "%.4f", it) } ?: "",
+                    rComm?.let { String.format(Locale.US, "%.4f", it) } ?: ""
+                )
+
+                val monthRows = prompt4.monthlyRows.map { m ->
+                    val mKey = m.monthKey
+                    val monthTx = activeTx.filter { it.effectiveDate().startsWith(mKey) }
+                    val monthSalesTx = monthTx.filter { it.type == BusinessTransaction.TYPE_SALE }
+                    val monthDigitalTx = monthTx.filter { it.isDigitalPayment }
+                    val monthAdoptionPct = if (monthTx.isNotEmpty()) ((monthDigitalTx.size * 100.0) / monthTx.size).toInt() else null
+                    val monthMpesaSales = monthSalesTx.filter { it.paymentMethod == BusinessTransaction.METHOD_MPESA }.sumOf { it.amountKes }
+                    val monthDigitalKes = monthDigitalTx.sumOf { it.amountKes }
+                    val monthDigitalShare = if (m.salesKes > 0.0) ((monthSalesTx.filter { it.isDigitalPayment }.sumOf { it.amountKes } / m.salesKes) * 100.0) else null
+                    val monthCamps = campaigns.filter { it.effectiveDate().startsWith(mKey) }
+                    val mCampSpend = monthCamps.sumOf { it.spendKes }
+                    val mCampInq = monthCamps.sumOf { it.inquiriesGenerated }
+                    val mCpe = if (mCampInq > 0L) mCampSpend / mCampInq else null
+                    val monthComms = communications.filter { it.effectiveReceivedDate().startsWith(mKey) }
+                    val mRespCount = monthComms.count {
+                        it.status == OnlineCommunicationLog.STATUS_RESPONDED || it.status == OnlineCommunicationLog.STATUS_CONVERTED
+                    }
+                    val mRespRate = if (monthComms.isNotEmpty()) (mRespCount * 100.0) / monthComms.size else null
+                    val mAvgResp = if (monthComms.isNotEmpty()) monthComms.map { it.responseMinutes }.average().toLong() else null
+
+                    listOf(
+                        "MONTHLY_PANEL",
+                        m.monthKey,
+                        smeCode,
+                        location,
+                        dataMode,
+                        monthCamps.size.toString(),
+                        String.format(Locale.US, "%.2f", mCampSpend),
+                        monthCamps.sumOf { it.reachCount }.toString(),
+                        monthCamps.sumOf { it.engagementCount }.toString(),
+                        mCampInq.toString(),
+                        mCpe?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                        monthDigitalTx.size.toString(),
+                        monthTx.size.toString(),
+                        monthAdoptionPct?.toString() ?: "",
+                        String.format(Locale.US, "%.2f", monthMpesaSales),
+                        String.format(Locale.US, "%.2f", monthDigitalKes),
+                        monthDigitalShare?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                        monthTx.size.toString(),
+                        "",
+                        inventory.size.toString(),
+                        inventory.count { it.isLowStock }.toString(),
+                        monthComms.size.toString(),
+                        mRespCount.toString(),
+                        mRespRate?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                        mAvgResp?.toString() ?: "",
+                        String.format(Locale.US, "%.2f", m.salesKes),
+                        String.format(Locale.US, "%.2f", m.expensesKes),
+                        String.format(Locale.US, "%.2f", m.netProfitKes),
+                        m.grossProfitKes?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                        m.momSalesGrowthPct?.let { String.format(Locale.US, "%.2f", it) } ?: "",
+                        customers.size.toString(),
+                        prompt4.repeatCustomerCount.toString(),
+                        "",
+                        "",
+                        ""
+                    )
+                }
+
+                GeneratedBusinessReport(
+                    type = type,
+                    title = "Academic Research Dataset (SPSS / Excel CSV)",
+                    businessName = smeCode,
+                    location = location,
+                    periodLabel = "${analytics.activeWindow.label} + ${prompt4.monthlyRows.size} Month(s)",
+                    generatedDateIso = today,
+                    isDemoData = isDemoData,
+                    summaryPairs = listOf(
+                        "Anonymized SME Code" to smeCode,
+                        "Panel Observations" to "${1 + monthRows.size} row(s) (${monthRows.size} monthly + 1 overall)",
+                        "Research Variables" to "${columns.size} numeric/categorical fields (IV1–IV4 → DV)",
+                        "Dataset Mode" to dataMode
+                    ),
+                    columns = columns,
+                    rows = listOf(overallRow) + monthRows,
+                    footerNote = "Anonymized SPSS/Excel panel dataset — ${ResearchFramework.METHODOLOGY_NOTE}"
+                )
+            }
         }
     }
 
@@ -426,9 +595,29 @@ object ReportExportManager {
         }
     }
 
+    fun buildRawTabularCsvContent(report: GeneratedBusinessReport): String {
+        fun escapeCsv(cell: String): String {
+            val needsQuote = cell.contains(',') || cell.contains('"') || cell.contains('\n') || cell.contains('\r')
+            val escaped = cell.replace("\"", "\"\"")
+            return if (needsQuote) "\"$escaped\"" else escaped
+        }
+
+        return buildString {
+            appendLine(report.columns.joinToString(",") { escapeCsv(it) })
+            report.rows.forEach { row ->
+                appendLine(row.joinToString(",") { escapeCsv(it) })
+            }
+        }
+    }
+
     fun writeCsvToStream(report: GeneratedBusinessReport, outputStream: OutputStream) {
+        val csvContent = if (report.type == BusinessReportType.RESEARCH_DATASET_SPSS) {
+            buildRawTabularCsvContent(report)
+        } else {
+            buildCsvContent(report)
+        }
         OutputStreamWriter(outputStream, StandardCharsets.UTF_8).use { writer ->
-            writer.write(buildCsvContent(report))
+            writer.write(csvContent)
             writer.flush()
         }
     }

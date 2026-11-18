@@ -29,6 +29,9 @@ import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Groups
@@ -81,6 +84,8 @@ import com.example.ui.theme.BrandTealBright
 import com.example.ui.theme.BrandTealDark
 import com.example.ui.theme.BrandTealLight
 import com.example.ui.theme.DemoAmber
+import com.example.ui.theme.DemoAmberDark
+import com.example.ui.theme.DemoAmberLight
 
 @Composable
 fun ProjectXBrandMark(
@@ -895,6 +900,68 @@ fun ProjectXLoadingScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = BrandSlateSilver
             )
+        }
+    }
+}
+
+@Composable
+fun OfflineSyncStatusBanner(
+    isOnline: Boolean,
+    hasPendingWrites: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (isOnline && !hasPendingWrites) return
+
+    val title = when {
+        !isOnline && hasPendingWrites -> "Offline Mode • Pending Cloud Sync"
+        !isOnline -> "Offline Mode • Viewing Cached Workspace"
+        else -> "Syncing Pending Offline Changes..."
+    }
+    val message = when {
+        !isOnline && hasPendingWrites ->
+            "Internet is unavailable. Queued edits are saved locally and are not yet confirmed on Cloud Firestore. Avoid duplicating sales until reconnected."
+        !isOnline ->
+            "No internet connection detected. Cached records remain viewable; atomic POS checkout and AI insights require connectivity."
+        else ->
+            "Connectivity restored. Synchronizing pending offline edits with Cloud Firestore..."
+    }
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("offline_sync_banner"),
+        color = if (!isOnline) DemoAmberLight else MaterialTheme.colorScheme.secondaryContainer,
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (!isOnline) DemoAmber.copy(alpha = 0.65f) else BrandPurple.copy(alpha = 0.45f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                imageVector = if (!isOnline) Icons.Filled.CloudOff else Icons.Filled.CloudSync,
+                contentDescription = title,
+                tint = if (!isOnline) DemoAmberDark else BrandPurple,
+                modifier = Modifier.size(20.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = if (!isOnline) DemoAmberDark else MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (!isOnline) DemoAmberDark else MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
         }
     }
 }

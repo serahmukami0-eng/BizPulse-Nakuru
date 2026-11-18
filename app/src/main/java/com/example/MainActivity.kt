@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -31,6 +32,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -76,11 +78,13 @@ import com.example.data.local.ProjectXLocalDatabase
 import com.example.data.model.AppModule
 import com.example.data.model.BusinessTransaction
 import com.example.data.model.RegistrationDraft
+import com.example.data.network.ConnectivityObserver
 import com.example.data.repository.BusinessRepository
 import com.example.data.repository.FirebaseAiAssistantRepository
 import com.example.data.repository.LocalOverviewRepository
 import com.example.data.service.FirebaseVertexTransactionGrowthService
 import com.example.ui.components.ModuleTileCard
+import com.example.ui.components.OfflineSyncStatusBanner
 import com.example.ui.components.ProjectXLoadingScreen
 import com.example.ui.components.moduleIcon
 import com.example.ui.screens.AiAssistantScreen
@@ -93,6 +97,7 @@ import com.example.ui.screens.OnboardingScreen
 import com.example.ui.screens.OnlineCommunicationScreen
 import com.example.ui.screens.PerformanceAnalyticsScreen
 import com.example.ui.screens.PosSaleDialog
+import com.example.ui.screens.ReceiptPreviewDialog
 import com.example.ui.screens.RecordKeepingScreen
 import com.example.ui.screens.RecordTransactionDialog
 import com.example.ui.screens.RegistrationScreen
@@ -274,6 +279,12 @@ private fun AuthenticatedWorkspace(
     val aiMessages by viewModel.aiMessages.collectAsStateWithLifecycle()
     val actionMessage by viewModel.actionMessage.collectAsStateWithLifecycle()
     val isSaving by viewModel.isSaving.collectAsStateWithLifecycle()
+    val hasPendingSyncWrites by viewModel.hasPendingSyncWrites.collectAsStateWithLifecycle()
+    val backupRestoreState by viewModel.backupRestoreState.collectAsStateWithLifecycle()
+    val latestPosReceipt by viewModel.latestPosReceipt.collectAsStateWithLifecycle()
+    val isOnline by remember(context) {
+        ConnectivityObserver.observeIsOnline(context)
+    }.collectAsStateWithLifecycle(initialValue = ConnectivityObserver.isCurrentlyOnline(context))
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(actionMessage) {
@@ -427,13 +438,37 @@ private fun AuthenticatedWorkspace(
                     }
                 }
 
-                if (profileState is UiState.Loading && transactionsState is UiState.Loading) {
-                    ProjectXLoadingScreen(
-                        statusMessage = "Syncing live Cloud Firestore workspace...",
-                        modifier = Modifier.weight(1f)
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                ) {
+                    if (isSaving) {
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("workspace_saving_indicator"),
+                            color = BrandPurple
+                        )
+                    }
+                    OfflineSyncStatusBanner(
+                        isOnline = isOnline,
+                        hasPendingWrites = hasPendingSyncWrites
                     )
-                } else {
-                    when (activeModule) {
+                    if (profileState is UiState.Loading && transactionsState is UiState.Loading) {
+                        ProjectXLoadingScreen(
+                            statusMessage = "Syncing live Cloud Firestore workspace...",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        ) {
+                            when (activeModule) {
                     AppModule.DASHBOARD -> BusinessDashboardScreen(
                         summary = summary,
                         analyticsReport = analyticsReport,
@@ -488,6 +523,7 @@ private fun AuthenticatedWorkspace(
                         onToggleDemoMode = viewModel::toggleDemoMode,
                         onAddTransaction = viewModel::addTransaction,
                         onRecordPosSale = viewModel::recordPosSale,
+                        onRecordPosCart = viewModel::recordPosCartSale,
                         onCancelSale = viewModel::cancelSaleTransaction,
                         onUpdateTransaction = viewModel::updateTransaction,
                         onDeleteTransaction = viewModel::deleteTransaction,
@@ -570,6 +606,12 @@ private fun AuthenticatedWorkspace(
                         analyticsReport = analyticsReport,
                         prompt4Analytics = prompt4Analytics,
                         isSaving = isSaving,
+                        backupRestoreState = backupRestoreState,
+                        onRequestBackupJson = viewModel::generateWorkspaceBackupJson,
+                        onReportBackupExportOutcome = viewModel::reportBackupExportOutcome,
+                        onInspectBackupJson = viewModel::inspectBackupFileJson,
+                        onConfirmRestoreBackup = viewModel::confirmRestoreBackup,
+                        onDismissRestoreConfirmation = viewModel::dismissRestoreConfirmation,
                         onBackToDashboard = { openModule(AppModule.DASHBOARD) },
                         onOpenAllModules = { showAllModulesSheet = true },
                         onToggleDemoMode = viewModel::toggleDemoMode,
@@ -592,7 +634,9 @@ private fun AuthenticatedWorkspace(
                         onSendPrompt = viewModel::askAiAssistant,
                         onAnalyzeTransactions = viewModel::analyzeTransactionHistory
                     )
-                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -661,6 +705,21 @@ private fun AuthenticatedWorkspace(
                     manualAmountText = manualAmt
                 )
                 quickDialogType = null
+            },
+            onConfirmPosCart = { cartItems, defaultCategory, method, ref, status, date, notes, custId, custName, cartDiscountText ->
+                viewModel.recordPosCartSale(
+                    cartItems = cartItems,
+                    defaultCategory = defaultCategory,
+                    paymentMethod = method,
+                    transactionRef = ref,
+                    paymentStatus = status,
+                    transactionDate = date,
+                    notes = notes,
+                    customerId = custId,
+                    customerName = custName,
+                    cartDiscountText = cartDiscountText
+                )
+                quickDialogType = null
             }
         )
     } else if (quickDialogType != null) {
@@ -681,6 +740,17 @@ private fun AuthenticatedWorkspace(
                 )
                 quickDialogType = null
             }
+        )
+    }
+
+    val receiptLines = latestPosReceipt
+    if (!receiptLines.isNullOrEmpty()) {
+        ReceiptPreviewDialog(
+            transaction = receiptLines.first(),
+            receiptItems = receiptLines,
+            businessName = summary.businessName,
+            businessLocation = summary.locationNakuru,
+            onDismiss = viewModel::dismissLatestPosReceipt
         )
     }
 }

@@ -31,13 +31,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Assessment
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -45,6 +49,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -67,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.data.analytics.Prompt4AnalyticsBundle
 import com.example.data.analytics.SmeFullAnalyticsReport
+import com.example.data.backup.BackupSummary
 import com.example.data.export.BusinessReportType
 import com.example.data.export.ReportExportManager
 import com.example.data.model.AppModule
@@ -95,6 +101,7 @@ import com.example.ui.theme.BrandTeal
 import com.example.ui.theme.BrandTealBright
 import com.example.ui.theme.DemoAmberDark
 import com.example.ui.theme.DemoAmberLight
+import com.example.ui.viewmodel.BackupRestoreUiState
 import com.example.ui.viewmodel.DashboardSummary
 import com.example.ui.viewmodel.UiState
 import java.text.SimpleDateFormat
@@ -116,6 +123,12 @@ fun ReportsScreen(
     analyticsReport: SmeFullAnalyticsReport,
     prompt4Analytics: Prompt4AnalyticsBundle,
     isSaving: Boolean,
+    backupRestoreState: BackupRestoreUiState = BackupRestoreUiState.Idle,
+    onRequestBackupJson: (onResult: (Result<Pair<String, BackupSummary>>) -> Unit) -> Unit = {},
+    onReportBackupExportOutcome: (Boolean, String) -> Unit = { _, _ -> },
+    onInspectBackupJson: (rawJson: String, sourceLabel: String) -> Unit = { _, _ -> },
+    onConfirmRestoreBackup: (replaceExisting: Boolean) -> Unit = {},
+    onDismissRestoreConfirmation: () -> Unit = {},
     onBackToDashboard: () -> Unit,
     onOpenAllModules: () -> Unit,
     onToggleDemoMode: (Boolean) -> Unit,
@@ -217,6 +230,51 @@ fun ReportsScreen(
         }
     }
 
+    val researchSpssReport = remember(
+        summary,
+        activeTx,
+        activeInv,
+        activeCust,
+        activePo,
+        activeCamps,
+        activeComms,
+        analyticsReport,
+        prompt4Analytics
+    ) {
+        ReportExportManager.generateReport(
+            type = BusinessReportType.RESEARCH_DATASET_SPSS,
+            businessName = summary.businessName,
+            location = summary.locationNakuru,
+            isDemoData = summary.isDemoMode,
+            transactions = activeTx,
+            inventory = activeInv,
+            customers = activeCust,
+            purchases = activePo,
+            campaigns = activeCamps,
+            communications = activeComms,
+            analytics = analyticsReport,
+            prompt4 = prompt4Analytics,
+            periodLabel = analyticsReport.activeWindow.label
+        )
+    }
+
+    val researchCsvLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    ReportExportManager.writeCsvToStream(researchSpssReport, out)
+                } ?: error("Unable to open destination file stream.")
+            }.onSuccess {
+                exportStatusMessage = "Exported Chapter 4 SPSS / Excel Research CSV (${researchSpssReport.rows.size} observation row(s))."
+                Toast.makeText(context, "Research CSV saved!", Toast.LENGTH_SHORT).show()
+            }.onFailure { err ->
+                exportStatusMessage = "Research CSV export failed: ${err.localizedMessage}"
+            }
+        }
+    }
+
     val pdfLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/pdf")
     ) { uri ->
@@ -230,6 +288,57 @@ fun ReportsScreen(
                 Toast.makeText(context, "PDF saved!", Toast.LENGTH_SHORT).show()
             }.onFailure { err ->
                 exportStatusMessage = "PDF export failed: ${err.localizedMessage}"
+            }
+        }
+    }
+
+    val backupExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            onRequestBackupJson { res ->
+                res.onSuccess { (json, backupSummary) ->
+                    runCatching {
+                        context.contentResolver.openOutputStream(uri)?.use { out ->
+                            out.write(json.toByteArray(Charsets.UTF_8))
+                            out.flush()
+                        } ?: error("Unable to open backup destination stream.")
+                    }.onSuccess {
+                        onReportBackupExportOutcome(
+                            true,
+                            "Saved backup (${backupSummary.totalRecords} records) successfully."
+                        )
+                    }.onFailure { err ->
+                        onReportBackupExportOutcome(
+                            false,
+                            "Backup export failed: ${err.localizedMessage}"
+                        )
+                    }
+                }.onFailure { err ->
+                    onReportBackupExportOutcome(
+                        false,
+                        err.localizedMessage ?: "Failed to compile backup."
+                    )
+                }
+            }
+        }
+    }
+
+    val backupRestoreLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use {
+                    it.readText()
+                } ?: error("Unable to read selected backup file.")
+            }.onSuccess { rawJson ->
+                onInspectBackupJson(rawJson, uri.lastPathSegment ?: "Selected backup")
+            }.onFailure { err ->
+                onReportBackupExportOutcome(
+                    false,
+                    "Could not read backup file: ${err.localizedMessage}"
+                )
             }
         }
     }
@@ -261,7 +370,7 @@ fun ReportsScreen(
                 item {
                     SectionHeader(
                         title = "Business Reports, CSV/PDF Exports & Printing (G)",
-                        subtitle = "Generate all 11 SME reports from Cloud Firestore records across IV1–IV4, POS, Stock & CRM"
+                        subtitle = "Generate all ${BusinessReportType.entries.size} SME & SPSS research reports from Cloud Firestore records"
                     )
                 }
 
@@ -318,7 +427,7 @@ fun ReportsScreen(
                                 }
                             }
 
-                            Text("Select Report Type (11 Available)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                            Text("Select Report Type (${BusinessReportType.entries.size} Available)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                             Row(
                                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -384,6 +493,19 @@ fun ReportsScreen(
                                     Icon(Icons.Filled.Print, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text("Print Report")
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        val filename = "ProjectX_Chapter4_SPSS_Dataset_${todayIsoDate()}.csv"
+                                        researchCsvLauncher.launch(filename)
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(1.dp, BrandTeal.copy(alpha = 0.7f)),
+                                    modifier = Modifier.testTag("export_spss_research_csv_button")
+                                ) {
+                                    Icon(Icons.Filled.Download, contentDescription = null, tint = BrandTeal, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("SPSS / Excel Research CSV", color = BrandTeal, fontWeight = FontWeight.SemiBold)
                                 }
                             }
 
@@ -691,6 +813,134 @@ fun ReportsScreen(
 
                 item {
                     Card(
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, BrandPurple.copy(alpha = 0.55f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("backup_restore_card")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Backup,
+                                    contentDescription = "Database Backup and Restore",
+                                    tint = BrandPurple,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "Database Backup & Restore (JSON)",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Text(
+                                text = "Export all saved live records (profile, sales, expenses, inventory, stock audit movements, customers, suppliers, purchases, campaigns, and inquiries) to a portable JSON backup, or restore a validated backup file.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (backupRestoreState is BackupRestoreUiState.Exporting ||
+                                backupRestoreState is BackupRestoreUiState.Restoring
+                            ) {
+                                LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = BrandPurple
+                                )
+                            }
+                            when (backupRestoreState) {
+                                is BackupRestoreUiState.Success -> {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = BrandTeal.copy(alpha = 0.14f),
+                                        modifier = Modifier.testTag("backup_status_banner")
+                                    ) {
+                                        Text(
+                                            text = backupRestoreState.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = BrandTeal,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(10.dp)
+                                        )
+                                    }
+                                }
+                                is BackupRestoreUiState.Error -> {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.errorContainer,
+                                        modifier = Modifier.testTag("backup_status_banner")
+                                    ) {
+                                        Text(
+                                            text = backupRestoreState.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                            modifier = Modifier.padding(10.dp)
+                                        )
+                                    }
+                                }
+                                else -> Unit
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        backupExportLauncher.launch("projectx_backup_${todayIsoDate()}.json")
+                                    },
+                                    enabled = !isSaving && backupRestoreState !is BackupRestoreUiState.Exporting &&
+                                        backupRestoreState !is BackupRestoreUiState.Restoring,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .testTag("export_backup_button"),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = BrandNavy)
+                                ) {
+                                    Icon(Icons.Filled.Backup, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Export Backup", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        backupRestoreLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                                    },
+                                    enabled = !isSaving && backupRestoreState !is BackupRestoreUiState.Exporting &&
+                                        backupRestoreState !is BackupRestoreUiState.Restoring,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .testTag("restore_backup_button"),
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, BrandPurple.copy(alpha = 0.7f))
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Restore,
+                                        contentDescription = null,
+                                        tint = BrandPurple,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Restore File",
+                                        color = BrandPurple,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    Card(
                         shape = RoundedCornerShape(20.dp),
                         colors = CardDefaults.cardColors(containerColor = Color.Transparent),
                         border = BorderStroke(1.2.dp, BrandPurple.copy(alpha = 0.65f)),
@@ -861,6 +1111,78 @@ fun ReportsScreen(
                 item { Spacer(modifier = Modifier.height(16.dp)) }
             }
         }
+    }
+
+    if (backupRestoreState is BackupRestoreUiState.ReadyToConfirmRestore) {
+        val bs = backupRestoreState.backup.summary
+        AlertDialog(
+            onDismissRequest = onDismissRestoreConfirmation,
+            modifier = Modifier.testTag("confirm_restore_dialog"),
+            icon = {
+                Icon(
+                    imageVector = Icons.Filled.WarningAmber,
+                    contentDescription = "Restore Warning",
+                    tint = AlertCoral
+                )
+            },
+            title = {
+                Text(
+                    text = "Confirm Database Restore",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Validated backup for '${bs.businessName}' (exported ${bs.exportedAtIso.take(10)}):",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "• ${bs.transactionsCount} transaction(s)\n" +
+                            "• ${bs.inventoryCount} inventory SKU(s), ${bs.stockMovementsCount} stock audit log(s)\n" +
+                            "• ${bs.customersCount} customer(s), ${bs.suppliersCount} supplier(s), ${bs.purchasesCount} purchase(s)\n" +
+                            "• ${bs.campaignsCount} campaign(s), ${bs.communicationsCount} inquiry log(s)",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.errorContainer
+                    ) {
+                        Text(
+                            text = "Warning: 'Replace All' permanently overwrites your current Cloud Firestore business records with this backup. Use 'Merge' to add or update matching IDs without deleting other records.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { onConfirmRestoreBackup(true) },
+                    modifier = Modifier.testTag("confirm_restore_replace_button"),
+                    colors = ButtonDefaults.buttonColors(containerColor = AlertCoral)
+                ) {
+                    Text("Replace All")
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    androidx.compose.material3.TextButton(
+                        onClick = onDismissRestoreConfirmation
+                    ) {
+                        Text("Cancel")
+                    }
+                    androidx.compose.material3.TextButton(
+                        onClick = { onConfirmRestoreBackup(false) },
+                        modifier = Modifier.testTag("confirm_restore_merge_button")
+                    ) {
+                        Text("Merge", color = BrandPurple, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        )
     }
 }
 

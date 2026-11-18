@@ -2,6 +2,9 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.R
+import com.example.data.backup.BackupSummary
+import com.example.data.backup.ValidatedWorkspaceBackup
+import com.example.data.backup.WorkspaceBackupPayload
 import com.example.data.firebase.OperationType
 import com.example.data.firebase.handleFirestoreError
 import com.example.data.model.BusinessProfile
@@ -10,6 +13,7 @@ import com.example.data.model.CustomerRecord
 import com.example.data.model.DigitalMarketingCampaign
 import com.example.data.model.InventoryItem
 import com.example.data.model.OnlineCommunicationLog
+import com.example.data.model.PosCartLineItem
 import com.example.data.model.PurchaseOrderRecord
 import com.example.data.model.StockMovementRecord
 import com.example.data.model.SupplierRecord
@@ -17,14 +21,18 @@ import com.example.data.model.todayIsoDate
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.MetadataChanges
+import com.google.firebase.firestore.WriteBatch
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -335,6 +343,71 @@ class BusinessRepository(
         }
     }
 
+    suspend fun fetchStockMovementsSnapshot(userId: String): List<StockMovementRecord> {
+        val colRef = db.collection("users").document(userId).collection("stockMovements")
+        return try {
+            val snapshot = colRef.get().await()
+            snapshot.toObjects(
+                StockMovementRecord::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+            ).sortedByDescending { it.createdAt?.seconds ?: 0L }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, colRef.path)
+            throw e
+        }
+    }
+
+    fun observeHasPendingWrites(userId: String): Flow<Boolean> {
+        val userDoc = db.collection("users").document(userId)
+        val flows = listOf(
+            userDoc.collection("transactions").snapshots(MetadataChanges.INCLUDE).map { it.metadata.hasPendingWrites() },
+            userDoc.collection("inventory").snapshots(MetadataChanges.INCLUDE).map { it.metadata.hasPendingWrites() },
+            userDoc.collection("customers").snapshots(MetadataChanges.INCLUDE).map { it.metadata.hasPendingWrites() },
+            userDoc.collection("suppliers").snapshots(MetadataChanges.INCLUDE).map { it.metadata.hasPendingWrites() },
+            userDoc.collection("purchases").snapshots(MetadataChanges.INCLUDE).map { it.metadata.hasPendingWrites() },
+            userDoc.collection("campaigns").snapshots(MetadataChanges.INCLUDE).map { it.metadata.hasPendingWrites() },
+            userDoc.collection("communications").snapshots(MetadataChanges.INCLUDE).map { it.metadata.hasPendingWrites() }
+        )
+        return combine(flows) { flags -> flags.any { it } }
+            .catch { error ->
+                if (error is CancellationException) throw error
+                emit(false)
+            }
+    }
+
+    suspend fun fetchWorkspaceBackupSnapshot(userId: String): Result<WorkspaceBackupPayload> {
+        return try {
+            val profile = fetchBusinessProfileSnapshot(userId)
+            val transactions = fetchTransactionHistorySnapshot(userId)
+            val inventory = fetchInventorySnapshot(userId)
+            val customers = fetchCustomersSnapshot(userId)
+            val suppliers = fetchSuppliersSnapshot(userId)
+            val purchases = fetchPurchasesSnapshot(userId)
+            val stockMovements = fetchStockMovementsSnapshot(userId)
+            val campaigns = fetchCampaignsSnapshot(userId)
+            val communications = fetchCommunicationsSnapshot(userId)
+            Result.success(
+                WorkspaceBackupPayload(
+                    profile = profile,
+                    transactions = transactions,
+                    inventory = inventory,
+                    customers = customers,
+                    suppliers = suppliers,
+                    purchases = purchases,
+                    stockMovements = stockMovements,
+                    campaigns = campaigns,
+                    communications = communications
+                )
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun saveBusinessProfile(
         ownerName: String,
         businessName: String,
@@ -604,6 +677,219 @@ class BusinessRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, txRef.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun recordMultiItemPosCart(
+        cartItems: List<PosCartLineItem>,
+        defaultCategory: String,
+        paymentMethod: String,
+        transactionRef: String = "",
+        paymentStatus: String = BusinessTransaction.STATUS_COMPLETED,
+        transactionDate: String = todayIsoDate(),
+        notes: String = "",
+        customerId: String = "",
+        customerName: String = "",
+        cartDiscountKes: Double = 0.0
+    ): Result<List<BusinessTransaction>> {
+        if (cartItems.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Cart is empty. Add at least one item."))
+        }
+        if (paymentStatus != BusinessTransaction.STATUS_COMPLETED &&
+            paymentStatus != BusinessTransaction.STATUS_PENDING
+        ) {
+            return Result.failure(IllegalArgumentException("POS checkout status must be COMPLETED or PENDING."))
+        }
+        val safeCartDiscount = cartDiscountKes.coerceAtLeast(0.0)
+        val uid = requireUserId()
+        val userDoc = db.collection("users").document(uid)
+        val custRef = customerId.takeIf { it.isNotBlank() }?.let { userDoc.collection("customers").document(it) }
+        val receiptNo = "PX-${(System.currentTimeMillis() % 900000L + 100000L)}"
+        val safeDate = transactionDate.trim().ifBlank { todayIsoDate() }.take(20)
+
+        return try {
+            val createdTransactions = db.runTransaction { transaction ->
+                // 1. Read all distinct inventory documents + optional customer document first
+                val distinctInvIds = cartItems.mapNotNull { it.inventoryItemId.takeIf(String::isNotBlank) }.distinct()
+                val invRefsById = distinctInvIds.associateWith { id -> userDoc.collection("inventory").document(id) }
+                val invSnapsById = invRefsById.mapValues { (_, ref) -> transaction.get(ref) }
+                val custSnap = custRef?.let { transaction.get(it) }
+
+                // 2. Aggregate requested quantities per inventory item and validate stock
+                val requestedByInvId = mutableMapOf<String, Long>()
+                val computedLines = cartItems.map { line ->
+                    val qty = line.quantity.coerceAtLeast(1L)
+                    if (line.unitPriceKes <= 0.0) {
+                        throw IllegalArgumentException("Item '${line.itemName}' must have unit price > 0 KES.")
+                    }
+                    val invId = line.inventoryItemId.trim()
+                    var itemName = line.itemName.trim().ifBlank { "Counter Item" }
+                    var unitCost = 0.0
+                    if (invId.isNotBlank()) {
+                        val invSnap = invSnapsById[invId]
+                        if (invSnap == null || !invSnap.exists()) {
+                            throw IllegalStateException("Product '${line.itemName}' no longer exists in inventory.")
+                        }
+                        val nextAgg = (requestedByInvId[invId] ?: 0L) + qty
+                        val available = invSnap.getLong("quantity") ?: 0L
+                        if (available < nextAgg) {
+                            throw IllegalStateException(
+                                "Insufficient stock for ${invSnap.getString("name").orEmpty()} (Available: $available, Requested: $nextAgg)."
+                            )
+                        }
+                        requestedByInvId[invId] = nextAgg
+                        itemName = invSnap.getString("name").orEmpty().ifBlank { itemName }
+                        unitCost = (invSnap.getDouble("unitCostKes") ?: 0.0).coerceAtLeast(0.0)
+                    }
+                    val gross = qty * line.unitPriceKes
+                    val lineDisc = line.lineDiscountKes.coerceAtLeast(0.0)
+                    if (lineDisc >= gross) {
+                        throw IllegalArgumentException("Line discount for '$itemName' cannot equal or exceed line subtotal.")
+                    }
+                    Triple(line.copy(itemName = itemName, quantity = qty, lineDiscountKes = lineDisc), unitCost, gross - lineDisc)
+                }
+
+                val preCartDiscountSum = computedLines.sumOf { it.third }
+                if (safeCartDiscount >= preCartDiscountSum) {
+                    throw IllegalArgumentException("Cart discount cannot equal or exceed cart subtotal.")
+                }
+                val finalCartTotal = preCartDiscountSum - safeCartDiscount
+
+                // 3. Apply stock deductions and stockMovements once per distinct SKU
+                val remainingBalanceAfterSku = mutableMapOf<String, Long>()
+                requestedByInvId.forEach { (invId, totalDeducted) ->
+                    val invRef = invRefsById.getValue(invId)
+                    val invSnap = invSnapsById.getValue(invId)
+                    val currentQty = invSnap.getLong("quantity") ?: 0L
+                    val nextQty = currentQty - totalDeducted
+                    remainingBalanceAfterSku[invId] = nextQty
+                    transaction.update(
+                        invRef,
+                        mapOf(
+                            "quantity" to nextQty,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    val mvRef = userDoc.collection("stockMovements").document()
+                    transaction.set(
+                        mvRef,
+                        mapOf(
+                            "userId" to uid,
+                            "inventoryItemId" to invId.take(128),
+                            "itemName" to invSnap.getString("name").orEmpty().ifBlank { "Stock Item" }.take(100),
+                            "movementType" to StockMovementRecord.TYPE_SALE_DEDUCTION,
+                            "quantityDelta" to -totalDeducted,
+                            "balanceAfter" to nextQty,
+                            "referenceId" to receiptNo,
+                            "movementDate" to safeDate,
+                            "notes" to "POS Cart deduction ($receiptNo)".take(300),
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+
+                // 4. Write one transaction record per cart item sharing receiptNo
+                var allocatedCartDisc = 0.0
+                val builtTransactions = computedLines.mapIndexed { idx, (line, unitCost, netBeforeCartDisc) ->
+                    val extraDisc = if (safeCartDiscount <= 0.0) {
+                        0.0
+                    } else if (idx == computedLines.lastIndex) {
+                        (safeCartDiscount - allocatedCartDisc).coerceAtLeast(0.0)
+                    } else {
+                        val share = kotlin.math.round((safeCartDiscount * (netBeforeCartDisc / preCartDiscountSum)) * 100.0) / 100.0
+                        allocatedCartDisc += share
+                        share
+                    }
+                    val totalLineDiscount = line.lineDiscountKes + extraDisc
+                    val lineAmountKes = (netBeforeCartDisc - extraDisc).coerceAtLeast(0.01)
+                    val lineCogs = unitCost * line.quantity
+                    val txRef = userDoc.collection("transactions").document()
+                    val title = if (line.inventoryItemId.isNotBlank()) {
+                        "${line.itemName} x${line.quantity}".take(100)
+                    } else {
+                        line.itemName.take(100)
+                    }
+                    val cat = line.category.ifBlank { defaultCategory.ifBlank { "Retail Sales" } }.take(50)
+                    val itemNote = listOfNotNull(
+                        notes.trim().takeIf { it.isNotBlank() },
+                        if (computedLines.size > 1) "Cart ${idx + 1}/${computedLines.size}" else null
+                    ).joinToString(" | ").take(300)
+
+                    val txPayload = buildMap<String, Any> {
+                        put("userId", uid)
+                        put("type", BusinessTransaction.TYPE_SALE)
+                        put("title", title)
+                        put("category", cat)
+                        put("amountKes", lineAmountKes)
+                        put("paymentMethod", paymentMethod)
+                        put("transactionRef", transactionRef.trim().take(80))
+                        put("paymentStatus", paymentStatus)
+                        put("transactionDate", safeDate)
+                        put("notes", itemNote)
+                        if (customerId.isNotBlank()) put("customerId", customerId.trim().take(128))
+                        if (customerName.isNotBlank()) put("customerName", customerName.trim().take(100))
+                        if (line.inventoryItemId.isNotBlank()) {
+                            put("inventoryItemId", line.inventoryItemId.trim().take(128))
+                            put("inventoryItemName", line.itemName.trim().take(100))
+                            put("quantitySold", line.quantity)
+                            put("unitPriceKes", line.unitPriceKes)
+                        }
+                        if (totalLineDiscount > 0.0) put("discountKes", totalLineDiscount)
+                        if (lineCogs > 0.0) put("costOfGoodsSoldKes", lineCogs)
+                        put("receiptNumber", receiptNo)
+                        put("createdAt", FieldValue.serverTimestamp())
+                        put("updatedAt", FieldValue.serverTimestamp())
+                    }
+                    transaction.set(txRef, txPayload)
+
+                    BusinessTransaction(
+                        id = txRef.id,
+                        userId = uid,
+                        type = BusinessTransaction.TYPE_SALE,
+                        title = title,
+                        category = cat,
+                        amountKes = lineAmountKes,
+                        paymentMethod = paymentMethod,
+                        transactionRef = transactionRef.trim(),
+                        paymentStatus = paymentStatus,
+                        transactionDate = safeDate,
+                        notes = itemNote,
+                        customerId = customerId.trim(),
+                        customerName = customerName.trim(),
+                        inventoryItemId = line.inventoryItemId.trim(),
+                        inventoryItemName = line.itemName.trim(),
+                        quantitySold = line.quantity,
+                        unitPriceKes = line.unitPriceKes,
+                        discountKes = totalLineDiscount,
+                        costOfGoodsSoldKes = lineCogs,
+                        receiptNumber = receiptNo
+                    )
+                }
+
+                // 5. Update customer spend & visit count once
+                if (custRef != null && custSnap != null && custSnap.exists()) {
+                    val prevSpent = custSnap.getDouble("totalSpentKes") ?: 0.0
+                    val prevCount = custSnap.getLong("purchaseCount") ?: 0L
+                    transaction.update(
+                        custRef,
+                        mapOf(
+                            "totalSpentKes" to (prevSpent + finalCartTotal),
+                            "purchaseCount" to (prevCount + 1L),
+                            "lastPurchaseDate" to safeDate,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+
+                builtTransactions
+            }.await()
+            Result.success(createdTransactions)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, userDoc.path)
             Result.failure(e)
         }
     }
@@ -1413,6 +1699,263 @@ class BusinessRepository(
         }
     }
 
+    suspend fun restoreWorkspaceBackup(
+        backup: ValidatedWorkspaceBackup,
+        replaceExisting: Boolean
+    ): Result<BackupSummary> {
+        val uid = requireUserId()
+        val userDoc = db.collection("users").document(uid)
+        val payload = backup.payload
+        return try {
+            val subCollections = listOf(
+                "transactions",
+                "inventory",
+                "customers",
+                "suppliers",
+                "purchases",
+                "stockMovements",
+                "campaigns",
+                "communications"
+            )
+
+            val existingIdsByCollection = mutableMapOf<String, Set<String>>()
+            if (replaceExisting) {
+                val deleteOps = mutableListOf<(WriteBatch) -> Unit>()
+                for (colName in subCollections) {
+                    val snap = userDoc.collection(colName).get().await()
+                    snap.documents.forEach { doc ->
+                        deleteOps += { batch -> batch.delete(doc.reference) }
+                    }
+                    existingIdsByCollection[colName] = emptySet()
+                }
+                commitWriteBatches(deleteOps)
+            } else {
+                for (colName in subCollections) {
+                    val snap = userDoc.collection(colName).get().await()
+                    existingIdsByCollection[colName] = snap.documents.map { it.id }.toSet()
+                }
+            }
+
+            if (payload.profile != null) {
+                val p = payload.profile
+                val existingProfile = userDoc.get().await()
+                if (existingProfile.exists()) {
+                    userDoc.update(
+                        mapOf(
+                            "ownerName" to p.ownerName.trim().take(80),
+                            "businessName" to p.businessName.trim().take(100),
+                            "businessType" to p.businessType.trim().take(50),
+                            "locationNakuru" to p.locationNakuru.trim().take(80),
+                            "businessSize" to p.businessSize.trim().take(50),
+                            "phone" to p.phone.trim().take(25),
+                            "demoModeEnabled" to false,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                } else {
+                    userDoc.set(
+                        mapOf(
+                            "userId" to uid,
+                            "ownerName" to p.ownerName.trim().take(80),
+                            "businessName" to p.businessName.trim().take(100),
+                            "businessType" to p.businessType.trim().take(50),
+                            "locationNakuru" to p.locationNakuru.trim().take(80),
+                            "businessSize" to p.businessSize.trim().take(50),
+                            "phone" to p.phone.trim().take(25),
+                            "currency" to "KES",
+                            "demoModeEnabled" to false,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+
+            val writeOps = mutableListOf<(WriteBatch) -> Unit>()
+
+            fun enqueueUpsert(
+                colName: String,
+                docId: String,
+                mutableFields: Map<String, Any>,
+                createOnlyFields: Map<String, Any> = emptyMap()
+            ) {
+                val docRef: DocumentReference = userDoc.collection(colName).document(docId)
+                val exists = docId in (existingIdsByCollection[colName] ?: emptySet())
+                if (exists) {
+                    val updateMap = LinkedHashMap<String, Any>(mutableFields.size + 1)
+                    updateMap.putAll(mutableFields)
+                    updateMap["updatedAt"] = FieldValue.serverTimestamp()
+                    writeOps += { batch -> batch.update(docRef, updateMap) }
+                } else {
+                    val createMap = LinkedHashMap<String, Any>(mutableFields.size + createOnlyFields.size + 3)
+                    createMap["userId"] = uid
+                    createMap.putAll(mutableFields)
+                    createMap.putAll(createOnlyFields)
+                    createMap["createdAt"] = FieldValue.serverTimestamp()
+                    createMap["updatedAt"] = FieldValue.serverTimestamp()
+                    writeOps += { batch -> batch.set(docRef, createMap) }
+                }
+            }
+
+            payload.transactions.forEach { tx ->
+                val fields = buildMap<String, Any> {
+                    put("type", tx.type)
+                    put("title", tx.title.trim().take(100))
+                    put("category", tx.category.trim().take(50))
+                    put("amountKes", tx.amountKes)
+                    put("paymentMethod", tx.paymentMethod)
+                    put("transactionRef", tx.transactionRef.trim().take(80))
+                    put("paymentStatus", tx.paymentStatus)
+                    put("transactionDate", tx.transactionDate.trim().take(20))
+                    put("notes", tx.notes.trim().take(300))
+                    if (tx.customerId.isNotBlank()) put("customerId", tx.customerId.trim().take(128))
+                    if (tx.customerName.isNotBlank()) put("customerName", tx.customerName.trim().take(100))
+                    if (tx.inventoryItemId.isNotBlank()) put("inventoryItemId", tx.inventoryItemId.trim().take(128))
+                    if (tx.inventoryItemName.isNotBlank()) put("inventoryItemName", tx.inventoryItemName.trim().take(100))
+                    if (tx.quantitySold > 0L) put("quantitySold", tx.quantitySold)
+                    if (tx.unitPriceKes > 0.0) put("unitPriceKes", tx.unitPriceKes)
+                    if (tx.discountKes > 0.0) put("discountKes", tx.discountKes)
+                    if (tx.costOfGoodsSoldKes > 0.0) put("costOfGoodsSoldKes", tx.costOfGoodsSoldKes)
+                    if (tx.receiptNumber.isNotBlank()) put("receiptNumber", tx.receiptNumber.trim().take(50))
+                }
+                enqueueUpsert("transactions", tx.id, fields)
+            }
+
+            payload.inventory.forEach { item ->
+                val fields = buildMap<String, Any> {
+                    put("name", item.name.trim().take(100))
+                    put("sku", item.sku.trim().take(40))
+                    put("category", item.category.trim().take(50))
+                    put("quantity", item.quantity.coerceAtLeast(0L))
+                    put("reorderLevel", item.reorderLevel.coerceAtLeast(0L))
+                    put("unitPriceKes", item.unitPriceKes.coerceAtLeast(0.0))
+                    put("unitCostKes", item.unitCostKes.coerceAtLeast(0.0))
+                    put("supplierId", item.supplierId.trim().take(128))
+                    put("supplierName", item.supplierName.trim().take(100))
+                }
+                enqueueUpsert("inventory", item.id, fields)
+            }
+
+            payload.customers.forEach { c ->
+                val fields = mapOf<String, Any>(
+                    "name" to c.name.trim().take(100),
+                    "phone" to c.phone.trim().take(30),
+                    "email" to c.email.trim().take(120),
+                    "location" to c.location.trim().take(80),
+                    "notes" to c.notes.trim().take(300),
+                    "totalSpentKes" to c.totalSpentKes.coerceAtLeast(0.0),
+                    "purchaseCount" to c.purchaseCount.coerceAtLeast(0L),
+                    "lastPurchaseDate" to c.lastPurchaseDate.trim().take(20),
+                    "createdDate" to c.createdDate.trim().take(20)
+                )
+                enqueueUpsert("customers", c.id, fields)
+            }
+
+            payload.suppliers.forEach { s ->
+                val fields = mapOf<String, Any>(
+                    "name" to s.name.trim().take(100),
+                    "contactPerson" to s.contactPerson.trim().take(100),
+                    "phone" to s.phone.trim().take(30),
+                    "email" to s.email.trim().take(120),
+                    "location" to s.location.trim().take(80),
+                    "suppliedProductsSummary" to s.suppliedProductsSummary.trim().take(250),
+                    "notes" to s.notes.trim().take(300)
+                )
+                enqueueUpsert("suppliers", s.id, fields)
+            }
+
+            payload.purchases.forEach { po ->
+                val fields = buildMap<String, Any> {
+                    if (po.supplierId.isNotBlank()) put("supplierId", po.supplierId.trim().take(128))
+                    if (po.supplierName.isNotBlank()) put("supplierName", po.supplierName.trim().take(100))
+                    if (po.inventoryItemId.isNotBlank()) put("inventoryItemId", po.inventoryItemId.trim().take(128))
+                    put("itemName", po.itemName.trim().take(100))
+                    put("quantity", po.quantity.coerceAtLeast(1L))
+                    put("unitCostKes", po.unitCostKes.coerceAtLeast(0.0))
+                    put("totalCostKes", po.totalCostKes.coerceAtLeast(0.0))
+                    put("paymentMethod", po.paymentMethod)
+                    put("paymentStatus", po.paymentStatus)
+                    put("purchaseDate", po.purchaseDate.trim().take(20))
+                    put("notes", po.notes.trim().take(300))
+                }
+                enqueueUpsert("purchases", po.id, fields)
+            }
+
+            val existingMovements = existingIdsByCollection["stockMovements"] ?: emptySet()
+            payload.stockMovements.forEach { mv ->
+                // stockMovements are append-only in firestore.rules (allow update: if false)
+                if (mv.id !in existingMovements) {
+                    val mvRef = userDoc.collection("stockMovements").document(mv.id)
+                    val mvMap = buildMap<String, Any> {
+                        put("userId", uid)
+                        put("inventoryItemId", mv.inventoryItemId.trim().take(128))
+                        put("itemName", mv.itemName.trim().take(100))
+                        put("movementType", mv.movementType)
+                        put("quantityDelta", mv.quantityDelta)
+                        put("balanceAfter", mv.balanceAfter.coerceAtLeast(0L))
+                        if (mv.referenceId.isNotBlank()) put("referenceId", mv.referenceId.trim().take(128))
+                        if (mv.unitCostKes > 0.0) put("unitCostKes", mv.unitCostKes)
+                        if (mv.totalCostKes > 0.0) put("totalCostKes", mv.totalCostKes)
+                        if (mv.supplierId.isNotBlank()) put("supplierId", mv.supplierId.trim().take(128))
+                        if (mv.supplierName.isNotBlank()) put("supplierName", mv.supplierName.trim().take(100))
+                        put("movementDate", mv.movementDate.trim().take(20))
+                        put("notes", mv.notes.trim().take(300))
+                        put("createdAt", FieldValue.serverTimestamp())
+                        put("updatedAt", FieldValue.serverTimestamp())
+                    }
+                    writeOps += { batch -> batch.set(mvRef, mvMap) }
+                }
+            }
+
+            payload.campaigns.forEach { camp ->
+                val fields = mapOf<String, Any>(
+                    "title" to camp.title.trim().take(100),
+                    "channel" to camp.channel,
+                    "campaignDate" to camp.campaignDate.trim().take(20),
+                    "spendKes" to camp.spendKes.coerceAtLeast(0.0),
+                    "reachCount" to camp.reachCount.coerceAtLeast(0L),
+                    "engagementCount" to camp.engagementCount.coerceAtLeast(0L),
+                    "inquiriesGenerated" to camp.inquiriesGenerated.coerceAtLeast(0L),
+                    "status" to camp.status,
+                    "notes" to camp.notes.trim().take(300)
+                )
+                enqueueUpsert("campaigns", camp.id, fields)
+            }
+
+            payload.communications.forEach { comm ->
+                val fields = mapOf<String, Any>(
+                    "customerName" to comm.customerName.trim().take(100),
+                    "channel" to comm.channel,
+                    "category" to comm.category,
+                    "subject" to comm.subject.trim().take(120),
+                    "receivedDate" to comm.receivedDate.trim().take(20),
+                    "responseDate" to comm.responseDate.trim().take(20),
+                    "status" to comm.status,
+                    "responseMinutes" to comm.responseMinutes.coerceAtLeast(0L),
+                    "notes" to comm.notes.trim().take(300)
+                )
+                enqueueUpsert("communications", comm.id, fields)
+            }
+
+            commitWriteBatches(writeOps)
+            Result.success(backup.summary)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, userDoc.path)
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun commitWriteBatches(operations: List<(WriteBatch) -> Unit>) {
+        if (operations.isEmpty()) return
+        operations.chunked(MAX_BATCH_OPS).forEach { chunk ->
+            val batch = db.batch()
+            chunk.forEach { op -> op(batch) }
+            batch.commit().await()
+        }
+    }
+
     private fun logStreamError(error: Throwable, op: OperationType, path: String, expectedUid: String) {
         val firestoreError = generateSequence(error) { it.cause }
             .filterIsInstance<FirebaseFirestoreException>()
@@ -1422,5 +1965,9 @@ class BusinessRepository(
         if (exceptionToLog != null && auth.currentUser?.uid == expectedUid) {
             handleFirestoreError(exceptionToLog, op, path)
         }
+    }
+
+    private companion object {
+        const val MAX_BATCH_OPS = 350
     }
 }

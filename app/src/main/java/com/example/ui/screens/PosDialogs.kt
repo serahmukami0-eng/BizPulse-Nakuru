@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Typeface
@@ -13,10 +14,14 @@ import android.print.PrintAttributes
 import android.print.PrintDocumentAdapter
 import android.print.PrintDocumentInfo
 import android.print.PrintManager
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,9 +34,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddShoppingCart
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Receipt
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -43,6 +53,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -64,6 +75,7 @@ import com.example.data.model.BusinessTransaction
 import com.example.data.model.CustomerRecord
 import com.example.data.model.InventoryItem
 import com.example.data.model.NakuruSmeCatalog
+import com.example.data.model.PosCartLineItem
 import com.example.data.model.PurchaseOrderRecord
 import com.example.data.model.SupplierRecord
 import com.example.data.model.formatKes
@@ -76,6 +88,7 @@ import com.example.ui.theme.BrandPurpleSoft
 import com.example.ui.theme.BrandTeal
 import com.example.ui.theme.BrandTealDark
 import com.example.ui.theme.BrandTealLight
+import java.io.File
 import java.io.FileOutputStream
 
 @Composable
@@ -131,7 +144,19 @@ fun PosSaleDialog(
         unitPriceText: String,
         discountText: String,
         manualAmountText: String
-    ) -> Unit
+    ) -> Unit,
+    onConfirmPosCart: (
+        cartItems: List<PosCartLineItem>,
+        defaultCategory: String,
+        paymentMethod: String,
+        transactionRef: String,
+        paymentStatus: String,
+        transactionDate: String,
+        notes: String,
+        customerId: String,
+        customerName: String,
+        cartDiscountText: String
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _ -> }
 ) {
     val outlets = remember(businessLocation) {
         listOf(
@@ -157,6 +182,8 @@ fun PosSaleDialog(
     }
     var discountText by remember { mutableStateOf("0") }
     var manualAmountText by remember { mutableStateOf("") }
+    var cartItems by remember { mutableStateOf<List<PosCartLineItem>>(emptyList()) }
+    var cartDiscountText by remember { mutableStateOf("0") }
     var paymentMethod by remember { mutableStateOf(BusinessTransaction.METHOD_MPESA) }
     var transactionRef by remember { mutableStateOf("") }
     var paymentStatus by remember { mutableStateOf(BusinessTransaction.STATUS_COMPLETED) }
@@ -168,11 +195,17 @@ fun PosSaleDialog(
     val unitPriceNum = unitPriceText.trim().toDoubleOrNull() ?: 0.0
     val rawDiscountNum = discountText.trim().toDoubleOrNull() ?: 0.0
     val discountNum = rawDiscountNum.coerceAtLeast(0.0)
-    val computedTotal = if (linkInventoryProduct && selectedItem != null) {
+    val rawCartDiscount = cartDiscountText.trim().toDoubleOrNull() ?: 0.0
+    val cartDiscountNum = rawCartDiscount.coerceAtLeast(0.0)
+    val cartSubtotalBeforeCartDiscount = cartItems.sumOf { it.netBeforeCartDiscountKes }
+    val cartNetTotal = (cartSubtotalBeforeCartDiscount - cartDiscountNum).coerceAtLeast(0.0)
+
+    val singleItemComputedTotal = if (linkInventoryProduct && selectedItem != null) {
         (qtyNum * unitPriceNum - discountNum).coerceAtLeast(0.0)
     } else {
         manualAmountText.trim().toDoubleOrNull() ?: 0.0
     }
+    val computedTotal = if (cartItems.isNotEmpty()) cartNetTotal else singleItemComputedTotal
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -347,6 +380,158 @@ fun PosSaleDialog(
                     }
                 }
 
+                // Add current SKU or Custom/Service line to Multi-Item POS Cart
+                OutlinedButton(
+                    onClick = {
+                        val linked = if (linkInventoryProduct) selectedItem else null
+                        if (linked != null) {
+                            val alreadyQueued = cartItems
+                                .filter { it.inventoryItemId == linked.id }
+                                .sumOf { it.quantity }
+                            when {
+                                qtyNum <= 0L -> validationError = "Sale quantity must be at least 1."
+                                alreadyQueued + qtyNum > linked.quantity -> {
+                                    validationError = "Insufficient stock for ${linked.name}: ${linked.quantity} total in stock ($alreadyQueued already in cart)."
+                                }
+                                rawDiscountNum < 0.0 -> validationError = "Discount cannot be negative."
+                                unitPriceNum <= 0.0 -> validationError = "Unit price must be greater than 0."
+                                qtyNum * unitPriceNum - discountNum <= 0.0 -> {
+                                    validationError = "Line total must exceed 0 KES."
+                                }
+                                else -> {
+                                    val newLine = PosCartLineItem(
+                                        lineId = "${linked.id}_${System.currentTimeMillis()}_${cartItems.size}",
+                                        inventoryItemId = linked.id,
+                                        itemName = linked.name,
+                                        category = category,
+                                        quantity = qtyNum,
+                                        unitPriceKes = unitPriceNum,
+                                        lineDiscountKes = discountNum
+                                    )
+                                    cartItems = cartItems + newLine
+                                    quantityText = "1"
+                                    discountText = "0"
+                                    validationError = null
+                                }
+                            }
+                        } else {
+                            val customAmt = manualAmountText.trim().toDoubleOrNull() ?: 0.0
+                            if (title.isBlank() || customAmt <= 0.0) {
+                                validationError = "Enter sale description and positive KES amount to add to cart."
+                            } else {
+                                val newLine = PosCartLineItem(
+                                    lineId = "custom_${System.currentTimeMillis()}_${cartItems.size}",
+                                    inventoryItemId = "",
+                                    itemName = title.trim(),
+                                    category = category,
+                                    quantity = 1L,
+                                    unitPriceKes = customAmt,
+                                    lineDiscountKes = 0.0
+                                )
+                                cartItems = cartItems + newLine
+                                title = ""
+                                manualAmountText = ""
+                                validationError = null
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, BrandTeal.copy(alpha = 0.7f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("pos_add_to_cart_button")
+                ) {
+                    Icon(Icons.Filled.AddShoppingCart, contentDescription = null, tint = BrandTeal, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (cartItems.isEmpty()) "Add Item to Multi-Item Cart" else "Add Another Item (${cartItems.size} in Cart)",
+                        color = BrandTealDark,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                if (cartItems.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        border = BorderStroke(1.dp, BrandTeal.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pos_cart_list")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(Icons.Filled.ShoppingCart, contentDescription = null, tint = BrandTeal, modifier = Modifier.size(16.dp))
+                                Text(
+                                    text = "POS Cart (${cartItems.size} item(s))",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            cartItems.forEach { line ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "${line.itemName} × ${line.quantity}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = buildString {
+                                                append("@ ${formatKes(line.unitPriceKes)}")
+                                                if (line.lineDiscountKes > 0.0) {
+                                                    append(" (-${formatKes(line.lineDiscountKes)})")
+                                                }
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Text(
+                                        text = formatKes(line.netBeforeCartDiscountKes),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = BrandTealDark
+                                    )
+                                    IconButton(
+                                        onClick = { cartItems = cartItems.filterNot { it.lineId == line.lineId } }
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Delete,
+                                            contentDescription = "Remove ${line.itemName}",
+                                            tint = AlertCoral,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            OutlinedTextField(
+                                value = cartDiscountText,
+                                onValueChange = {
+                                    cartDiscountText = it
+                                    validationError = null
+                                },
+                                label = { Text("Extra Cart Discount (KES)") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("pos_cart_discount_input")
+                            )
+                        }
+                    }
+                }
+
                 // Live Checkout Summary Bar
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -358,7 +543,12 @@ fun PosSaleDialog(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Payable Total", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = BrandNavy)
+                        Text(
+                            text = if (cartItems.isNotEmpty()) "Cart Payable Total (${cartItems.size})" else "Payable Total",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = BrandNavy
+                        )
                         Text(formatKes(computedTotal), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = BrandPurple)
                     }
                 }
@@ -449,21 +639,40 @@ fun PosSaleDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val linked = if (linkInventoryProduct) selectedItem else null
-                    when {
-                        !isValidIsoDate(transactionDate) -> validationError = "Use YYYY-MM-DD date format."
-                        linked != null && qtyNum <= 0L -> validationError = "Sale quantity must be at least 1."
-                        linked != null && qtyNum > linked.quantity -> validationError = "Insufficient stock: only ${linked.quantity} in stock."
-                        linked != null && rawDiscountNum < 0.0 -> validationError = "Discount cannot be negative."
-                        linked != null && unitPriceNum <= 0.0 -> validationError = "Unit price must be greater than 0."
-                        linked == null && (title.isBlank() || computedTotal <= 0.0) -> validationError = "Enter sale description and positive KES amount."
-                        computedTotal <= 0.0 -> validationError = "Net payable total must exceed 0 KES."
-                        else -> {
-                            val combinedNotes = listOfNotNull(
-                                "Outlet: $selectedOutlet",
-                                notes.trim().takeIf { it.isNotBlank() }
-                            ).joinToString(" | ")
-                            onConfirmPosSale(
+                    val combinedNotes = listOfNotNull(
+                        "Outlet: $selectedOutlet",
+                        notes.trim().takeIf { it.isNotBlank() }
+                    ).joinToString(" | ")
+                    if (cartItems.isNotEmpty()) {
+                        when {
+                            !isValidIsoDate(transactionDate) -> validationError = "Use YYYY-MM-DD date format."
+                            rawCartDiscount < 0.0 -> validationError = "Cart discount cannot be negative."
+                            rawCartDiscount >= cartSubtotalBeforeCartDiscount -> validationError = "Cart discount cannot equal or exceed subtotal."
+                            cartNetTotal <= 0.0 -> validationError = "Net payable total must exceed 0 KES."
+                            else -> onConfirmPosCart(
+                                cartItems,
+                                category,
+                                paymentMethod,
+                                transactionRef.trim(),
+                                paymentStatus,
+                                transactionDate.trim(),
+                                combinedNotes,
+                                selectedCustomer?.id ?: "",
+                                selectedCustomer?.name ?: "",
+                                cartDiscountText.trim()
+                            )
+                        }
+                    } else {
+                        val linked = if (linkInventoryProduct) selectedItem else null
+                        when {
+                            !isValidIsoDate(transactionDate) -> validationError = "Use YYYY-MM-DD date format."
+                            linked != null && qtyNum <= 0L -> validationError = "Sale quantity must be at least 1."
+                            linked != null && qtyNum > linked.quantity -> validationError = "Insufficient stock: only ${linked.quantity} in stock."
+                            linked != null && rawDiscountNum < 0.0 -> validationError = "Discount cannot be negative."
+                            linked != null && unitPriceNum <= 0.0 -> validationError = "Unit price must be greater than 0."
+                            linked == null && (title.isBlank() || computedTotal <= 0.0) -> validationError = "Enter sale description and positive KES amount."
+                            computedTotal <= 0.0 -> validationError = "Net payable total must exceed 0 KES."
+                            else -> onConfirmPosSale(
                                 title.ifBlank { linked?.name ?: "Counter Sale" },
                                 category,
                                 paymentMethod,
@@ -484,29 +693,38 @@ fun PosSaleDialog(
                 },
                 modifier = Modifier.testTag("pos_checkout_confirm_button")
             ) {
-                Text("Complete Sale")
+                Text(if (cartItems.isNotEmpty()) "Complete Cart (${cartItems.size})" else "Complete Sale")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ReceiptPreviewDialog(
     transaction: BusinessTransaction,
     businessName: String,
     businessLocation: String,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    receiptItems: List<BusinessTransaction> = listOf(transaction)
 ) {
     val context = LocalContext.current
-    val receiptNo = transaction.receiptNumber.ifBlank { "PX-${transaction.id.take(6).uppercase()}" }
+    val effectiveItems = receiptItems.ifEmpty { listOf(transaction) }
+    val primary = effectiveItems.first()
+    val receiptNo = primary.receiptNumber.ifBlank { "PX-${primary.id.take(6).uppercase()}" }
+    val netTotalKes = effectiveItems.sumOf { it.amountKes }
+    val totalDiscountKes = effectiveItems.sumOf { it.discountKes }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Icon(Icons.Filled.Receipt, contentDescription = null, tint = BrandTeal)
-                Text("Digital POS Receipt", fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (effectiveItems.size > 1) "Digital POS Receipt (${effectiveItems.size} items)" else "Digital POS Receipt",
+                    fontWeight = FontWeight.Bold
+                )
             }
         },
         text = {
@@ -524,37 +742,85 @@ fun ReceiptPreviewDialog(
                 ) {
                     Text(businessName.uppercase(), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     Text(businessLocation, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                    Text("Receipt #: $receiptNo • ${transaction.effectiveDate()}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                    Text("Receipt #: $receiptNo • ${primary.effectiveDate()}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
                     HorizontalDivider()
-                    ReceiptRow("Item / Sale", transaction.inventoryItemName.ifBlank { transaction.title })
-                    if (transaction.quantitySold > 0L) {
-                        ReceiptRow("Qty × Unit Price", "${transaction.quantitySold} × ${formatKes(transaction.unitPriceKes)}")
+                    effectiveItems.forEach { item ->
+                        ReceiptRow(
+                            label = item.inventoryItemName.ifBlank { item.title },
+                            value = formatKes(item.amountKes)
+                        )
+                        if (item.quantitySold > 0L && item.unitPriceKes > 0.0) {
+                            Text(
+                                text = "  ${item.quantitySold} × ${formatKes(item.unitPriceKes)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
-                    if (transaction.discountKes > 0.0) {
-                        ReceiptRow("Discount", "-${formatKes(transaction.discountKes)}")
+                    if (totalDiscountKes > 0.0) {
+                        ReceiptRow("Total Discount", "-${formatKes(totalDiscountKes)}")
                     }
                     HorizontalDivider()
-                    ReceiptRow("NET TOTAL (KES)", formatKes(transaction.amountKes), highlight = true)
-                    ReceiptRow("Payment Method", transaction.paymentMethod)
-                    if (transaction.transactionRef.isNotBlank()) {
-                        ReceiptRow("Reference", transaction.transactionRef)
+                    ReceiptRow("NET TOTAL (KES)", formatKes(netTotalKes), highlight = true)
+                    ReceiptRow("Payment Method", primary.paymentMethod)
+                    if (primary.transactionRef.isNotBlank()) {
+                        ReceiptRow("Reference", primary.transactionRef)
                     }
-                    ReceiptRow("Customer", transaction.customerName.ifBlank { "Walk-in Customer" })
-                    ReceiptRow("Status", transaction.paymentStatus)
-                    if (transaction.notes.isNotBlank()) {
-                        Text(transaction.notes, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    ReceiptRow("Customer", primary.customerName.ifBlank { "Walk-in Customer" })
+                    ReceiptRow("Status", primary.paymentStatus)
+                    if (primary.notes.isNotBlank()) {
+                        Text(primary.notes, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
         },
         confirmButton = {
-            Button(
-                onClick = { printPosReceipt(context, transaction, businessName, businessLocation, receiptNo) },
-                colors = ButtonDefaults.buttonColors(containerColor = BrandNavy)
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Icon(Icons.Filled.Print, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Print Receipt")
+                OutlinedButton(
+                    onClick = {
+                        sharePosReceiptText(
+                            context = context,
+                            items = effectiveItems,
+                            businessName = businessName,
+                            location = businessLocation,
+                            receiptNo = receiptNo
+                        )
+                    },
+                    modifier = Modifier.testTag("receipt_share_text_button")
+                ) {
+                    Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Share Text")
+                }
+                OutlinedButton(
+                    onClick = {
+                        sharePosReceiptPdf(
+                            context = context,
+                            items = effectiveItems,
+                            businessName = businessName,
+                            location = businessLocation,
+                            receiptNo = receiptNo
+                        )
+                    },
+                    modifier = Modifier.testTag("receipt_share_pdf_button")
+                ) {
+                    Icon(Icons.Filled.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Share PDF")
+                }
+                Button(
+                    onClick = { printPosReceipt(context, effectiveItems, businessName, businessLocation, receiptNo) },
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandNavy),
+                    modifier = Modifier.testTag("receipt_print_button")
+                ) {
+                    Icon(Icons.Filled.Print, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Print")
+                }
             }
         },
         dismissButton = {
@@ -573,7 +839,8 @@ private fun ReceiptRow(label: String, value: String, highlight: Boolean = false)
             text = label,
             style = if (highlight) MaterialTheme.typography.labelLarge else MaterialTheme.typography.bodySmall,
             fontWeight = if (highlight) FontWeight.Bold else FontWeight.Normal,
-            fontFamily = FontFamily.Monospace
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.weight(1f)
         )
         Text(
             text = value,
@@ -585,9 +852,150 @@ private fun ReceiptRow(label: String, value: String, highlight: Boolean = false)
     }
 }
 
+internal fun formatReceiptShareText(
+    items: List<BusinessTransaction>,
+    businessName: String,
+    location: String,
+    receiptNo: String
+): String {
+    val primary = items.firstOrNull() ?: return ""
+    val netTotal = items.sumOf { it.amountKes }
+    val totalDisc = items.sumOf { it.discountKes }
+    return buildString {
+        appendLine("*${businessName.uppercase()}*")
+        if (location.isNotBlank()) appendLine(location)
+        appendLine("Receipt #: $receiptNo")
+        appendLine("Date: ${primary.effectiveDate()}")
+        appendLine("Customer: ${primary.customerName.ifBlank { "Walk-in Customer" }}")
+        appendLine("--------------------------------")
+        items.forEach { item ->
+            val label = item.inventoryItemName.ifBlank { item.title }
+            if (item.quantitySold > 0L && item.unitPriceKes > 0.0) {
+                appendLine("$label (${item.quantitySold} x ${formatKes(item.unitPriceKes)}) — ${formatKes(item.amountKes)}")
+            } else {
+                appendLine("$label — ${formatKes(item.amountKes)}")
+            }
+        }
+        if (totalDisc > 0.0) {
+            appendLine("Discount: -${formatKes(totalDisc)}")
+        }
+        appendLine("--------------------------------")
+        appendLine("*TOTAL PAID (KES): ${formatKes(netTotal)}*")
+        append("Method: ${primary.paymentMethod} (${primary.paymentStatus})")
+        if (primary.transactionRef.isNotBlank()) {
+            append(" | Ref: ${primary.transactionRef}")
+        }
+        appendLine()
+        append("Asante! Powered by Project X SME System")
+    }
+}
+
+private fun sharePosReceiptText(
+    context: Context,
+    items: List<BusinessTransaction>,
+    businessName: String,
+    location: String,
+    receiptNo: String
+) {
+    val body = formatReceiptShareText(items, businessName, location, receiptNo)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, "Receipt $receiptNo — $businessName")
+        putExtra(Intent.EXTRA_TEXT, body)
+    }
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, "Share Digital Receipt"))
+    }.onFailure {
+        Toast.makeText(context, "No sharing app found on this device.", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun buildReceiptPdfDocument(
+    items: List<BusinessTransaction>,
+    businessName: String,
+    location: String,
+    receiptNo: String
+): PdfDocument {
+    val primary = items.first()
+    val netTotal = items.sumOf { it.amountKes }
+    val totalDisc = items.sumOf { it.discountKes }
+    val estimatedHeight = (360 + items.size * 34).coerceIn(460, 1200)
+    val doc = PdfDocument()
+    val page = doc.startPage(PdfDocument.PageInfo.Builder(320, estimatedHeight, 1).create())
+    val c = page.canvas
+    val titlePaint = Paint().apply {
+        color = AndroidColor.BLACK
+        textSize = 13f
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+    }
+    val bodyPaint = Paint().apply {
+        color = AndroidColor.DKGRAY
+        textSize = 10f
+        typeface = Typeface.MONOSPACE
+    }
+    var y = 32f
+    c.drawText(businessName.take(28), 20f, y, titlePaint); y += 16f
+    c.drawText(location.take(32), 20f, y, bodyPaint); y += 18f
+    c.drawText("Receipt: $receiptNo", 20f, y, bodyPaint); y += 14f
+    c.drawText("Date: ${primary.effectiveDate()}", 20f, y, bodyPaint); y += 18f
+    c.drawText("--------------------------------", 20f, y, bodyPaint); y += 16f
+    items.forEach { tx ->
+        val label = tx.inventoryItemName.ifBlank { tx.title }.take(28)
+        c.drawText(label, 20f, y, titlePaint); y += 14f
+        val lineDetail = if (tx.quantitySold > 0L && tx.unitPriceKes > 0.0) {
+            "${tx.quantitySold} x ${formatKes(tx.unitPriceKes)} = ${formatKes(tx.amountKes)}"
+        } else {
+            formatKes(tx.amountKes)
+        }
+        c.drawText(lineDetail.take(34), 20f, y, bodyPaint); y += 16f
+    }
+    if (totalDisc > 0.0) {
+        c.drawText("Discount: -${formatKes(totalDisc)}", 20f, y, bodyPaint); y += 15f
+    }
+    c.drawText("TOTAL: ${formatKes(netTotal)}", 20f, y, titlePaint); y += 18f
+    c.drawText("Paid via: ${primary.paymentMethod} (${primary.paymentStatus})", 20f, y, bodyPaint); y += 14f
+    if (primary.transactionRef.isNotBlank()) {
+        c.drawText("Ref: ${primary.transactionRef}", 20f, y, bodyPaint); y += 14f
+    }
+    c.drawText("Customer: ${primary.customerName.ifBlank { "Walk-in" }}", 20f, y, bodyPaint); y += 20f
+    c.drawText("Asante! Powered by Project X", 20f, y, bodyPaint)
+    doc.finishPage(page)
+    return doc
+}
+
+private fun sharePosReceiptPdf(
+    context: Context,
+    items: List<BusinessTransaction>,
+    businessName: String,
+    location: String,
+    receiptNo: String
+) {
+    runCatching {
+        val dir = File(context.cacheDir, "receipts").apply { mkdirs() }
+        val safeNo = receiptNo.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+        val outFile = File(dir, "Receipt_$safeNo.pdf")
+        val doc = buildReceiptPdfDocument(items, businessName, location, receiptNo)
+        try {
+            FileOutputStream(outFile).use { out -> doc.writeTo(out) }
+        } finally {
+            doc.close()
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outFile)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/pdf"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "Digital POS Receipt $receiptNo — $businessName")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Share PDF Receipt"))
+    }.onFailure { err ->
+        Toast.makeText(context, "Could not share PDF receipt: ${err.localizedMessage}", Toast.LENGTH_SHORT).show()
+    }
+}
+
 private fun printPosReceipt(
     context: Context,
-    tx: BusinessTransaction,
+    items: List<BusinessTransaction>,
     businessName: String,
     location: String,
     receiptNo: String
@@ -618,41 +1026,8 @@ private fun printPosReceipt(
             cancellationSignal: CancellationSignal?,
             callback: WriteResultCallback
         ) {
-            val doc = PdfDocument()
+            val doc = buildReceiptPdfDocument(items, businessName, location, receiptNo)
             try {
-                val page = doc.startPage(PdfDocument.PageInfo.Builder(320, 480, 1).create())
-                val c = page.canvas
-                val titlePaint = Paint().apply {
-                    color = AndroidColor.BLACK
-                    textSize = 13f
-                    typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-                }
-                val bodyPaint = Paint().apply {
-                    color = AndroidColor.DKGRAY
-                    textSize = 10f
-                    typeface = Typeface.MONOSPACE
-                }
-                var y = 32f
-                c.drawText(businessName.take(28), 20f, y, titlePaint); y += 16f
-                c.drawText(location.take(32), 20f, y, bodyPaint); y += 18f
-                c.drawText("Receipt: $receiptNo", 20f, y, bodyPaint); y += 14f
-                c.drawText("Date: ${tx.effectiveDate()}", 20f, y, bodyPaint); y += 18f
-                c.drawText("--------------------------------", 20f, y, bodyPaint); y += 16f
-                c.drawText(tx.inventoryItemName.ifBlank { tx.title }.take(30), 20f, y, titlePaint); y += 15f
-                if (tx.quantitySold > 0L) {
-                    c.drawText("${tx.quantitySold} x ${formatKes(tx.unitPriceKes)}", 20f, y, bodyPaint); y += 15f
-                }
-                if (tx.discountKes > 0.0) {
-                    c.drawText("Discount: -${formatKes(tx.discountKes)}", 20f, y, bodyPaint); y += 15f
-                }
-                c.drawText("TOTAL: ${formatKes(tx.amountKes)}", 20f, y, titlePaint); y += 18f
-                c.drawText("Paid via: ${tx.paymentMethod} (${tx.paymentStatus})", 20f, y, bodyPaint); y += 14f
-                if (tx.transactionRef.isNotBlank()) {
-                    c.drawText("Ref: ${tx.transactionRef}", 20f, y, bodyPaint); y += 14f
-                }
-                c.drawText("Customer: ${tx.customerName.ifBlank { "Walk-in" }}", 20f, y, bodyPaint); y += 20f
-                c.drawText("Asante! Powered by Project X", 20f, y, bodyPaint)
-                doc.finishPage(page)
                 FileOutputStream(destination.fileDescriptor).use { out -> doc.writeTo(out) }
                 callback.onWriteFinished(arrayOf(PageRange.ALL_PAGES))
             } catch (e: Exception) {

@@ -407,6 +407,286 @@ class BusinessRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
     }
 
+    @Test
+    fun persistenceAndWorkspaceBackupRestore_replaceAndMerge_succeedUnderSecurityRules() = runBlocking {
+        val uid = signInTestUser(ALICE_EMAIL)
+        val repository = BusinessRepository(firestore, auth)
+
+        // Save business profile
+        assertTrue(
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                repository.saveBusinessProfile(
+                    ownerName = "Serah Mukami",
+                    businessName = "Nakuru Fresh Mart",
+                    businessType = "Retail Shop",
+                    locationNakuru = "Kenyatta Avenue, Nakuru",
+                    businessSize = "Small (6–20 staff)",
+                    phone = "+254712345678",
+                    demoModeEnabled = false
+                )
+            }.isSuccess
+        )
+
+        // Create & re-read sale + expense + inventory + customer + supplier
+        val saleId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addTransaction(
+                type = BusinessTransaction.TYPE_SALE,
+                title = "Wholesale Rice Bag",
+                category = "Retail Sales",
+                amountKes = 4200.0,
+                paymentMethod = BusinessTransaction.METHOD_MPESA,
+                transactionRef = "PXB001",
+                paymentStatus = BusinessTransaction.STATUS_COMPLETED,
+                transactionDate = "2026-11-16",
+                notes = "Paid on delivery"
+            ).getOrThrow()
+        }
+        val extraTempSaleId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addTransaction(
+                type = BusinessTransaction.TYPE_SALE,
+                title = "Temporary Counter Entry",
+                category = "Retail Sales",
+                amountKes = 350.0,
+                paymentMethod = BusinessTransaction.METHOD_CASH,
+                transactionDate = "2026-11-16"
+            ).getOrThrow()
+        }
+        val persistedSales = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchTransactionHistorySnapshot(uid)
+        }
+        assertTrue(persistedSales.any { it.id == saleId && it.amountKes == 4200.0 })
+
+        // Delete & verify removal
+        assertTrue(withTimeout(DEFAULT_TIMEOUT_MS) { repository.deleteTransaction(extraTempSaleId) }.isSuccess)
+        val salesAfterDelete = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchTransactionHistorySnapshot(uid)
+        }
+        assertTrue(salesAfterDelete.none { it.id == extraTempSaleId })
+
+        // Add & verify inventory
+        val invId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addInventoryItem(
+                name = "Cooking Oil 2L",
+                sku = "OIL-2L",
+                category = "Pantry",
+                quantity = 18L,
+                reorderLevel = 5L,
+                unitPriceKes = 520.0,
+                unitCostKes = 410.0
+            ).getOrThrow()
+        }
+        val persistedInv = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchInventorySnapshot(uid)
+        }
+        assertTrue(persistedInv.any { it.id == invId && it.quantity == 18L })
+
+        // Create, edit, and verify updated customer
+        val custId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addCustomer(
+                name = "John Kamau",
+                phone = "+254711222333",
+                email = "jk@example.co.ke",
+                location = "London Estate, Nakuru",
+                notes = "Regular buyer"
+            ).getOrThrow()
+        }
+        assertTrue(
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                repository.updateCustomer(
+                    customerId = custId,
+                    name = "John Kamau Mwangi",
+                    phone = "+254711222444",
+                    email = "john.mwangi@example.co.ke",
+                    location = "Milimani, Nakuru",
+                    notes = "VIP buyer"
+                )
+            }.isSuccess
+        )
+        val persistedCustomers = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchCustomersSnapshot(uid)
+        }
+        val updatedCust = persistedCustomers.first { it.id == custId }
+        assertEquals("John Kamau Mwangi", updatedCust.name)
+        assertEquals("Milimani, Nakuru", updatedCust.location)
+
+        // Export full workspace snapshot -> serialize JSON -> validate
+        val snapshotPayload = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchWorkspaceBackupSnapshot(uid).getOrThrow()
+        }
+        val backupJson = com.example.data.backup.ProjectXBackupManager.serializeWorkspaceBackup(snapshotPayload)
+        val validatedBackup = com.example.data.backup.ProjectXBackupManager.parseAndValidateBackup(backupJson).getOrThrow()
+
+        // Mutate workspace by adding a post-backup record, then restore with Replace All
+        val postBackupExpenseId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addTransaction(
+                type = BusinessTransaction.TYPE_EXPENSE,
+                title = "Post-Backup Fuel",
+                category = "Transport",
+                amountKes = 900.0,
+                paymentMethod = BusinessTransaction.METHOD_CASH,
+                transactionDate = "2026-11-16"
+            ).getOrThrow()
+        }
+        assertTrue(
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                repository.restoreWorkspaceBackup(validatedBackup, replaceExisting = true)
+            }.isSuccess
+        )
+        val txAfterReplace = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchTransactionHistorySnapshot(uid)
+        }
+        assertTrue(txAfterReplace.none { it.id == postBackupExpenseId })
+        assertTrue(txAfterReplace.any { it.id == saleId && it.title == "Wholesale Rice Bag" })
+
+        // Test Merge mode preserves post-backup records while upserting backup records
+        val extraMergeSaleId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addTransaction(
+                type = BusinessTransaction.TYPE_SALE,
+                title = "Merge Mode Retained Sale",
+                category = "Retail Sales",
+                amountKes = 750.0,
+                paymentMethod = BusinessTransaction.METHOD_MPESA,
+                transactionDate = "2026-11-16"
+            ).getOrThrow()
+        }
+        assertTrue(
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                repository.restoreWorkspaceBackup(validatedBackup, replaceExisting = false)
+            }.isSuccess
+        )
+        val txAfterMerge = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchTransactionHistorySnapshot(uid)
+        }
+        assertTrue(txAfterMerge.any { it.id == extraMergeSaleId })
+        assertTrue(txAfterMerge.any { it.id == saleId })
+    }
+
+    @Test
+    fun recordMultiItemPosCart_commitsAtomicallyAndRejectsPartialStockShortfall() = runBlocking {
+        val uid = signInTestUser(ALICE_EMAIL)
+        val repository = BusinessRepository(firestore, auth)
+
+        val flourId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addInventoryItem(
+                name = "Maize Flour 2kg",
+                sku = "FLR-2K",
+                category = "Dry Goods",
+                quantity = 10L,
+                reorderLevel = 3L,
+                unitPriceKes = 180.0,
+                unitCostKes = 140.0
+            ).getOrThrow()
+        }
+        val oilId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addInventoryItem(
+                name = "Cooking Oil 1L",
+                sku = "OIL-1L",
+                category = "Pantry",
+                quantity = 3L,
+                reorderLevel = 2L,
+                unitPriceKes = 350.0,
+                unitCostKes = 280.0
+            ).getOrThrow()
+        }
+        val custId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.addCustomer(
+                name = "Peter Njuguna",
+                phone = "+254720555111",
+                email = "pn@nakuru.co.ke",
+                location = "Freehold, Nakuru",
+                notes = "Cart customer"
+            ).getOrThrow()
+        }
+
+        // Net before cart discount: (2 * 180 - 10) + (2 * 350) = 350 + 700 = 1050; - 50 cart discount = 1000.0 KES
+        val cartResult = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.recordMultiItemPosCart(
+                cartItems = listOf(
+                    com.example.data.model.PosCartLineItem(
+                        lineId = "l1",
+                        inventoryItemId = flourId,
+                        itemName = "Maize Flour 2kg",
+                        category = "Retail Sales",
+                        quantity = 2L,
+                        unitPriceKes = 180.0,
+                        lineDiscountKes = 10.0
+                    ),
+                    com.example.data.model.PosCartLineItem(
+                        lineId = "l2",
+                        inventoryItemId = oilId,
+                        itemName = "Cooking Oil 1L",
+                        category = "Retail Sales",
+                        quantity = 2L,
+                        unitPriceKes = 350.0,
+                        lineDiscountKes = 0.0
+                    )
+                ),
+                defaultCategory = "Retail Sales",
+                paymentMethod = BusinessTransaction.METHOD_MPESA,
+                transactionRef = "TI99CART01",
+                paymentStatus = BusinessTransaction.STATUS_COMPLETED,
+                transactionDate = "2026-11-18",
+                notes = "Outlet: Main Nakuru Shop",
+                customerId = custId,
+                customerName = "Peter Njuguna",
+                cartDiscountKes = 50.0
+            )
+        }
+        assertTrue(cartResult.isSuccess)
+        val createdLines = cartResult.getOrThrow()
+        assertEquals(2, createdLines.size)
+        val sharedReceipt = createdLines.first().receiptNumber
+        assertTrue(sharedReceipt.startsWith("PX-"))
+        assertTrue(createdLines.all { it.receiptNumber == sharedReceipt })
+        assertEquals(1000.0, createdLines.sumOf { it.amountKes }, 0.01)
+
+        val invAfterCart = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchInventorySnapshot(uid)
+        }
+        assertEquals(8L, invAfterCart.first { it.id == flourId }.quantity)
+        assertEquals(1L, invAfterCart.first { it.id == oilId }.quantity)
+
+        val custAfterCart = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchCustomersSnapshot(uid)
+        }.first { it.id == custId }
+        assertEquals(1L, custAfterCart.purchaseCount)
+        assertEquals(1000.0, custAfterCart.totalSpentKes, 0.01)
+
+        // Second cart exceeds Oil remaining stock (only 1 left, requests 5): MUST fail atomically with zero deduction on Flour!
+        val failingCartResult = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.recordMultiItemPosCart(
+                cartItems = listOf(
+                    com.example.data.model.PosCartLineItem(
+                        lineId = "l3",
+                        inventoryItemId = flourId,
+                        itemName = "Maize Flour 2kg",
+                        category = "Retail Sales",
+                        quantity = 2L,
+                        unitPriceKes = 180.0
+                    ),
+                    com.example.data.model.PosCartLineItem(
+                        lineId = "l4",
+                        inventoryItemId = oilId,
+                        itemName = "Cooking Oil 1L",
+                        category = "Retail Sales",
+                        quantity = 5L,
+                        unitPriceKes = 350.0
+                    )
+                ),
+                defaultCategory = "Retail Sales",
+                paymentMethod = BusinessTransaction.METHOD_MPESA,
+                transactionDate = "2026-11-18"
+            )
+        }
+        assertTrue(failingCartResult.isFailure)
+
+        val invAfterFailedCart = withTimeout(DEFAULT_TIMEOUT_MS) {
+            repository.fetchInventorySnapshot(uid)
+        }
+        assertEquals(8L, invAfterFailedCart.first { it.id == flourId }.quantity)
+        assertEquals(1L, invAfterFailedCart.first { it.id == oilId }.quantity)
+    }
+
     private companion object {
         const val ALICE_EMAIL = "alice.nakuru@test.com"
         const val BOB_EMAIL = "bob.nakuru@test.com"

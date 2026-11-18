@@ -120,6 +120,22 @@ data class BusinessTransaction(
     }
 }
 
+data class PosCartLineItem(
+    val lineId: String,
+    val inventoryItemId: String = "",
+    val itemName: String,
+    val category: String = "Retail Sales",
+    val quantity: Long = 1L,
+    val unitPriceKes: Double = 0.0,
+    val lineDiscountKes: Double = 0.0
+) {
+    val grossKes: Double
+        get() = (quantity.coerceAtLeast(1L) * unitPriceKes.coerceAtLeast(0.0))
+
+    val netBeforeCartDiscountKes: Double
+        get() = (grossKes - lineDiscountKes.coerceAtLeast(0.0)).coerceAtLeast(0.0)
+}
+
 @Keep
 @IgnoreExtraProperties
 data class InventoryItem(
