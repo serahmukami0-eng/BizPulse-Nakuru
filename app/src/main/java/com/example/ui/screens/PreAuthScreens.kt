@@ -95,7 +95,8 @@ import kotlinx.coroutines.launch
 fun WelcomeScreen(
     onGetStarted: () -> Unit,
     onCreateAccount: () -> Unit,
-    onSignIn: () -> Unit
+    onSignIn: () -> Unit,
+    onExplorePublicDemo: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -268,6 +269,35 @@ fun WelcomeScreen(
                     )
                 ) {
                     Text("Login", fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            OutlinedButton(
+                onClick = onExplorePublicDemo,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("welcome_public_demo_button"),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.2.dp, BrandPurple.copy(alpha = 0.55f))
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Storefront,
+                    contentDescription = null,
+                    tint = BrandPurple,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                    Text(
+                        text = "Explore Public Demo (No Sign-In)",
+                        fontWeight = FontWeight.Bold,
+                        color = BrandPurple
+                    )
+                    Text(
+                        text = "Preview dashboard charts, multi-item POS cart, receipts & SPSS CSV",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

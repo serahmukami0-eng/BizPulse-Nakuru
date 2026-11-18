@@ -168,19 +168,23 @@ class ProjectXUiAuditTest {
         var started = 0
         var register = 0
         var signIn = 0
+        var exploreDemo = 0
         composeRule.setContent {
             ProjectXTheme {
                 WelcomeScreen(
                     onGetStarted = { started++ },
                     onCreateAccount = { register++ },
-                    onSignIn = { signIn++ }
+                    onSignIn = { signIn++ },
+                    onExplorePublicDemo = { exploreDemo++ }
                 )
             }
         }
         composeRule.waitForIdle()
         composeRule.onNodeWithText("Digital Technology Adoption & SME Performance (KES)").assertIsDisplayed()
         composeRule.onNodeWithTag("welcome_get_started_button").performScrollTo().assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag("welcome_public_demo_button").performScrollTo().assertIsDisplayed().performClick()
         assertEquals(1, started)
+        assertEquals(1, exploreDemo)
     }
 
     @Test
@@ -557,5 +561,26 @@ class ProjectXUiAuditTest {
         assertTrue(shareText.contains("Sugar 2kg"))
         assertTrue(shareText.contains("Cooking Oil 1L"))
         assertTrue(shareText.contains("950"))
+    }
+
+    @Test
+    fun publicDemoWorkspace_rendersPreviewBannerAndRoutesToSignInWithoutAuth() {
+        var signInClicks = 0
+        var exitClicks = 0
+        composeRule.setContent {
+            ProjectXTheme {
+                PublicDemoWorkspace(
+                    onSignInClick = { signInClicks++ },
+                    onExitToWelcome = { exitClicks++ }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("public_demo_top_bar").assertIsDisplayed()
+        composeRule.onNodeWithText("Public Demo Preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("public_demo_sign_in_button").assertIsDisplayed().performClick()
+        assertEquals(1, signInClicks)
+        composeRule.onNodeWithTag("public_demo_exit_button").assertIsDisplayed().performClick()
+        assertEquals(1, exitClicks)
     }
 }

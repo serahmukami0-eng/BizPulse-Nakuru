@@ -141,7 +141,8 @@ fun ReportsScreen(
         phone: String,
         demoModeEnabled: Boolean
     ) -> Unit,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    isPublicPreviewMode: Boolean = false
 ) {
     val context = LocalContext.current
     var selectedReportType by remember { mutableStateOf(BusinessReportType.OVERALL_PERFORMANCE) }
@@ -1102,9 +1103,13 @@ fun ReportsScreen(
                         shape = RoundedCornerShape(14.dp),
                         border = BorderStroke(1.dp, AlertCoral.copy(alpha = 0.6f))
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = AlertCoral)
+                        Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = if (isPublicPreviewMode) BrandPurple else AlertCoral)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Sign Out", color = AlertCoral, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = if (isPublicPreviewMode) "Sign In to Cloud Workspace" else "Sign Out",
+                            color = if (isPublicPreviewMode) BrandPurple else AlertCoral,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
 
